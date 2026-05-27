@@ -38,6 +38,10 @@ The embedded monitoring UI (HTTP + WebSocket + Prometheus server, ~1.3 KLOC and 
 
 `MonitoringUIConfig` is kept as an **inert** struct only so existing configs carrying a `[monitoring_ui]` section still decode (the loader rejects unknown TOML keys). If `enabled = true` is set, the loader logs a warning that the section is ignored.
 
+### Offline source lists (no auto-update fetch)
+
+Remote downloading of the `[sources]` resolver/relay lists is **disabled at the binary level** (`sources.go`, `allowSourceDownloads = false`). Sources load exclusively from their local signed cache files (`public-resolvers.md` / `relays.md` + `.minisig`); the proxy never makes outbound HTTP to fetch or refresh them — removing a network dependency and a periodic egress from a privacy resolver. The signed cache files must be present in the working directory (the loader fails closed otherwise). The test suite re-enables downloads to keep exercising the fetch paths. Upstreams are best pinned directly via `[static]` stamps (see *Recommended runtime configuration*) so resolution doesn't depend on the catalog at all.
+
 ### Hot-path lock contention removed
 
 Per-query synchronization was reduced so query throughput scales with cores instead of serializing on shared mutexes:
@@ -101,6 +105,20 @@ re-sorts. The per-query selection math (2 RTT reads, a few float divisions, 2
 `rand.Intn`) is negligible, and on Go ≥1.22 without `rand.Seed` the RNG is
 lock-free, so the `RLock` path scales cleanly across all 4 cores. This is a pure
 runtime config change (no rebuild) — applied live to the deployed instance.
+
+Since remote source downloads are disabled (see *Offline source lists*), the
+upstreams are pinned by `[static]` stamp so resolution never depends on the
+catalog:
+
+```toml
+[static]
+  [static.'cloudflare']
+  stamp = 'sdns://...'              # DoH   (extracted from the signed list)
+  [static.'quad9-dnscrypt-ip4-nofilter-pri']
+  stamp = 'sdns://...'              # DNSCrypt
+  [static.'google']
+  stamp = 'sdns://...'              # DoH
+```
 
 ## Load & fuzz testing
 
