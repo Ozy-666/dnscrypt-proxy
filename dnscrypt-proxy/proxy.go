@@ -38,8 +38,6 @@ type Proxy struct {
 	registeredRelays              []RegisteredServer
 	listenAddresses               []string
 	localDoHListenAddresses       []string
-	monitoringUI                  MonitoringUIConfig
-	monitoringInstance            *MonitoringUI
 	xTransport                    *XTransport
 	allWeeklyRanges               *map[string]WeeklyRanges
 	routes                        *map[string][]string
@@ -266,22 +264,6 @@ func (proxy *Proxy) StartProxy() {
 	}
 	curve25519.ScalarBaseMult(&proxy.proxyPublicKey, &proxy.proxySecretKey)
 
-	// Initialize and start the monitoring UI if enabled
-	if proxy.monitoringUI.Enabled {
-		dlog.Noticef("Initializing monitoring UI")
-		proxy.monitoringInstance = NewMonitoringUI(proxy)
-		if proxy.monitoringInstance == nil {
-			dlog.Errorf("Failed to create monitoring UI instance")
-		} else {
-			dlog.Noticef("Starting monitoring UI")
-			if err := proxy.monitoringInstance.Start(); err != nil {
-				dlog.Errorf("Failed to start monitoring UI: %v", err)
-			} else {
-				dlog.Noticef("Monitoring UI started successfully")
-			}
-		}
-	}
-
 	proxy.startAcceptingClients()
 	if !proxy.child {
 		// Notify the service manager that dnscrypt-proxy is ready. dnscrypt-proxy manages itself in case
@@ -437,9 +419,11 @@ func (proxy *Proxy) updateRegisteredServers() error {
 func (proxy *Proxy) udpListener(clientPc *net.UDPConn) {
 	defer clientPc.Close()
 	for {
-		buffer := make([]byte, MaxDNSPacketSize-1)
+		bufPtr := udpQueryBufferPool.Get().(*[]byte)
+		buffer := *bufPtr
 		length, clientAddr, err := clientPc.ReadFrom(buffer)
 		if err != nil {
+			udpQueryBufferPool.Put(bufPtr)
 			return
 		}
 		packet := buffer[:length]
@@ -455,10 +439,12 @@ func (proxy *Proxy) udpListener(clientPc *net.UDPConn) {
 				time.Now(),
 				true,
 			) // respond synchronously, but only to cached/synthesized queries
+			udpQueryBufferPool.Put(bufPtr)
 			continue
 		}
 		go func() {
 			defer proxy.clientsCountDec()
+			defer udpQueryBufferPool.Put(bufPtr)
 			proxy.processIncomingQuery("udp", proxy.xTransport.mainProto, packet, &clientAddr, clientPc, time.Now(), false)
 		}()
 	}
@@ -611,11 +597,13 @@ func (proxy *Proxy) exchangeWithUDPServer(
 		proxy.prepareForRelay(serverInfo.UDPAddr.IP, serverInfo.UDPAddr.Port, &query)
 	}
 
-	encryptedResponse := make([]byte, MaxDNSPacketSize)
+	respPtr := encryptedResponseBufferPool.Get().(*[]byte)
+	encryptedResponse := *respPtr
 	var readErr error
 	for tries := 2; tries > 0; tries-- {
 		if _, err := pc.Write(query); err != nil {
 			proxy.udpConnPool.Discard(pc)
+			encryptedResponseBufferPool.Put(respPtr)
 			return nil, err
 		}
 		length, err := pc.Read(encryptedResponse)
@@ -630,12 +618,19 @@ func (proxy *Proxy) exchangeWithUDPServer(
 
 	if readErr != nil {
 		proxy.udpConnPool.Discard(pc)
+		encryptedResponseBufferPool.Put(respPtr)
 		return nil, readErr
 	}
 
 	proxy.udpConnPool.Put(upstreamAddr, pc)
 
-	return proxy.Decrypt(serverInfo, sharedKey, encryptedResponse, clientNonce)
+	decrypted, err := proxy.Decrypt(serverInfo, sharedKey, encryptedResponse, clientNonce)
+	if err != nil {
+		// On error Decrypt returns a slice aliasing the pooled buffer; drop it.
+		return decrypted, err
+	}
+	encryptedResponseBufferPool.Put(respPtr)
+	return decrypted, nil
 }
 
 func (proxy *Proxy) exchangeWithUDPServerViaProxy(
@@ -658,9 +653,11 @@ func (proxy *Proxy) exchangeWithUDPServerViaProxy(
 	if serverInfo.Relay != nil && serverInfo.Relay.Dnscrypt != nil {
 		proxy.prepareForRelay(serverInfo.UDPAddr.IP, serverInfo.UDPAddr.Port, &encryptedQuery)
 	}
-	encryptedResponse := make([]byte, MaxDNSPacketSize)
+	respPtr := encryptedResponseBufferPool.Get().(*[]byte)
+	encryptedResponse := *respPtr
 	for tries := 2; tries > 0; tries-- {
 		if _, err := pc.Write(encryptedQuery); err != nil {
+			encryptedResponseBufferPool.Put(respPtr)
 			return nil, err
 		}
 		length, err := pc.Read(encryptedResponse)
@@ -670,7 +667,13 @@ func (proxy *Proxy) exchangeWithUDPServerViaProxy(
 		}
 		dlog.Debugf("[%v] Retry on timeout", serverInfo.Name)
 	}
-	return proxy.Decrypt(serverInfo, sharedKey, encryptedResponse, clientNonce)
+	decrypted, err := proxy.Decrypt(serverInfo, sharedKey, encryptedResponse, clientNonce)
+	if err != nil {
+		// On error Decrypt returns a slice aliasing the pooled buffer; drop it.
+		return decrypted, err
+	}
+	encryptedResponseBufferPool.Put(respPtr)
+	return decrypted, nil
 }
 
 func (proxy *Proxy) exchangeWithTCPServer(
@@ -902,9 +905,6 @@ func (proxy *Proxy) processIncomingQuery(
 
 	// Apply logging plugins
 	pluginsState.ApplyLoggingPlugins(&proxy.pluginsGlobals)
-
-	// Update monitoring metrics
-	updateMonitoringMetrics(proxy, &pluginsState)
 
 	return response
 }

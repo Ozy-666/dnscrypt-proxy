@@ -88,7 +88,7 @@ func (plugin *PluginCache) Eval(pluginsState *PluginsState, msg *dns.Msg) error 
 	if time.Now().After(expiration) {
 		expiration2 := time.Now().Add(StaleResponseTTL)
 		updateTTL(synth, expiration2)
-		pluginsState.sessionData["stale"] = synth
+		pluginsState.setSessionData("stale", synth)
 		return nil
 	}
 

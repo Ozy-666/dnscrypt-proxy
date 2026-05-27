@@ -116,14 +116,6 @@ func newConfig() Config {
 		LogFileLatest:   true,
 		ListenAddresses: []string{"127.0.0.1:53"},
 		LocalDoH:        LocalDoHConfig{Path: "/dns-query"},
-		MonitoringUI: MonitoringUIConfig{
-			Enabled:        false,
-			ListenAddress:  "127.0.0.1:8080",
-			Username:       "admin", // Set to empty string to disable authentication
-			Password:       "changeme",
-			EnableQueryLog: false,
-			PrivacyLevel:   2,
-		},
 		Timeout:                  5000,
 		KeepAlive:                5,
 		CertRefreshConcurrency:   10,
@@ -266,6 +258,24 @@ type LocalDoHConfig struct {
 	Path            string   `toml:"path"`
 	CertFile        string   `toml:"cert_file"`
 	CertKeyFile     string   `toml:"cert_key_file"`
+}
+
+// MonitoringUIConfig is retained only so existing configs carrying a
+// [monitoring_ui] section still decode (the loader rejects unknown keys). The
+// monitoring UI itself is not built into this edge fork; the section is inert.
+type MonitoringUIConfig struct {
+	Enabled            bool   `toml:"enabled"`
+	ListenAddress      string `toml:"listen_address"`
+	Username           string `toml:"username"`
+	Password           string `toml:"password"`
+	TLSCertificate     string `toml:"tls_certificate"`
+	TLSKey             string `toml:"tls_key"`
+	EnableQueryLog     bool   `toml:"enable_query_log"`
+	PrivacyLevel       int    `toml:"privacy_level"`
+	MaxQueryLogEntries int    `toml:"max_query_log_entries"`
+	MaxMemoryMB        int    `toml:"max_memory_mb"`
+	PrometheusEnabled  bool   `toml:"prometheus_enabled"`
+	PrometheusPath     string `toml:"prometheus_path"`
 }
 
 type ServerSummary struct {

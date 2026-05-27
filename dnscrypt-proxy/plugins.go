@@ -268,9 +268,18 @@ func NewPluginsState(
 		timeout:                          proxy.timeout,
 		requestStart:                     start,
 		maxUnencryptedUDPSafePayloadSize: MaxDNSUDPSafePacketSize,
-		sessionData:                      make(map[string]any),
 		xTransport:                       proxy.xTransport,
 	}
+}
+
+// setSessionData lazily allocates the session map on first write. Reads from a
+// nil map are safe in Go, so the allocation is avoided entirely for configs
+// whose active plugins never write session data.
+func (pluginsState *PluginsState) setSessionData(key string, value any) {
+	if pluginsState.sessionData == nil {
+		pluginsState.sessionData = make(map[string]any, 2)
+	}
+	pluginsState.sessionData[key] = value
 }
 
 func (pluginsState *PluginsState) ApplyQueryPlugins(

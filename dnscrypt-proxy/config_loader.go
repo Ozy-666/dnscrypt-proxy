@@ -191,7 +191,9 @@ func configureServerParams(proxy *Proxy, config *Config) {
 	proxy.certRefreshDelayAfterFailure = 10 * time.Second
 	proxy.certIgnoreTimestamp = config.CertIgnoreTimestamp
 	proxy.ephemeralKeys = config.EphemeralKeys
-	proxy.monitoringUI = config.MonitoringUI
+	if config.MonitoringUI.Enabled {
+		dlog.Warn("monitoring_ui is enabled in the configuration but this edge build does not include the monitoring UI; the section is ignored")
+	}
 }
 
 // configureLoadBalancing - Configures load balancing strategy
