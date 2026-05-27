@@ -78,6 +78,73 @@ Pooled hot-path buffers (`bufpool.go`):
 | Encrypted response buffer | 948.8 ns, 4096 B, 1 alloc | **13.9 ns, 0 B, 0 allocs** |
 | `NewPluginsState` sessionData map | 1 map alloc/req | **0 allocs** |
 
+## Recommended runtime configuration (load balancing)
+
+The patched `getOne()` (see *Hot-path lock contention removed*) only takes the
+parallel-friendly shared `RLock()` for the **WP2** strategy. Every other strategy
+(`fastest`/`first`, `p2`, `ph`, `pN`, `random`) takes the exclusive `Lock()` and
+serializes every query on a single mutex, and `lb_estimator = true` adds an O(n)
+`sortByRtt` under that lock. For maximum QPS and lock-free selection on the
+4-core EPYC, configure:
+
+```toml
+lb_strategy = 'wp2'      # only strategy that uses the shared RLock path
+lb_estimator = false     # estimator is unused under WP2; keep it off explicitly
+```
+
+WP2 (weighted power-of-two-choices) samples two random servers per query, scores
+each by RTT (70%) + success rate (30%), and routes to the better one. Versus
+`fastest` (always the single lowest-RTT node) it spreads load across the anycast
+upstreams (Cloudflare / Quad9 / Google), keeps every server's RTT estimate fresh,
+and avoids the synchronized flip/herd jitter `fastest` exhibits when the estimator
+re-sorts. The per-query selection math (2 RTT reads, a few float divisions, 2
+`rand.Intn`) is negligible, and on Go ≥1.22 without `rand.Seed` the RNG is
+lock-free, so the `RLock` path scales cleanly across all 4 cores. This is a pure
+runtime config change (no rebuild) — applied live to the deployed instance.
+
+## Load & fuzz testing
+
+Validated on the live service (AMD EPYC 7542, 4 vCPU, single NUMA) with
+`lb_strategy = 'wp2'`, using a throwaway stdlib-only UDP client that crafts raw
+DNS query packets and fires them concurrently at the local listener
+(`127.0.0.1:5053`), while sampling the proxy's RSS, thread count and CPU jiffies
+from `/proc` once per second.
+
+**Methodology**
+
+- *Load:* N concurrent workers, each on its own UDP socket, send A-record queries
+  for a rotating set of ~15 domains for a fixed duration, read the reply with a
+  2 s deadline, and record latency plus rcode. Counters track ok / timeout /
+  error / SERVFAIL; latency percentiles are computed from all samples.
+  (`cache = false`, so every query is forwarded to an upstream.)
+- *Fuzz:* workers send malformed packets — pure random bytes; a valid 12-byte
+  header followed by garbage with a bogus QDCOUNT; sub-header truncated packets;
+  oversized (>4 KiB) packets; and a valid header with an illegal qname label —
+  then a known-good query confirms liveness. The proxy must drop all garbage
+  without crashing and keep answering valid queries.
+- *Mixed:* load and fuzz run simultaneously to confirm malformed traffic does not
+  degrade legitimate queries.
+
+**Results**
+
+| Scenario | Queries | OK | Timeouts | Errors | SERVFAIL | QPS | p50/p90/p99 |
+|----------|--------:|---:|---------:|-------:|---------:|----:|-------------|
+| Load (cold, 60 workers) | 22,286 | 22,120 | 166 (0.7%) | 0 | 0 | 1,843 | 18 / 31 / 46 ms |
+| Load (warm, 50 workers) | 30,765 | 30,612 | 153 (0.5%) | 0 | 0 | 3,061 | 6.8 / 8.3 / 22 ms |
+| Fuzz (3,300 malformed) | 3,300 | n/a | n/a | 0 crashes | n/a | n/a | 0 replies (all dropped) |
+
+- QPS is upstream-bound (every query forwarded to anycast), not proxy-bound: at
+  1,843 QPS the proxy used only ~0.46 of one core. The warm-run latency drop
+  (p50 18 → 6.8 ms) reflects the UDP connection pool reusing warm upstream sockets.
+- 0 errors / 0 SERVFAIL across ~53k legitimate queries; the ~0.5–0.7% timeouts
+  were upstream UDP non-responses, not proxy faults.
+- All 3,300 malformed packets were dropped at `validateQuery`/`Unpack` (0 replies,
+  ~0 CPU); no panic, nil-pointer or index-out-of-range in the journal; liveness
+  valid after every fuzz round.
+- RSS stayed flat at ~20 MB, threads at 6–7, and the process PID was unchanged
+  throughout (no crash or restart). Under the adversarial mix, legitimate queries
+  were unaffected (3,061 QPS, 0 errors) while garbage was dropped concurrently.
+
 ## Building
 
 Built via `dnscrypt-update.sh` (in the parent `nginx-build` dir), which clones this fork's `edge-stable` branch and produces a `GOAMD64=v3`, `CGO_ENABLED=0`, stripped/trimmed binary, then deploys and restarts the service.
