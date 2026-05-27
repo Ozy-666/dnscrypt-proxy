@@ -52,6 +52,32 @@ Per-query synchronization was reduced so query throughput scales with cores inst
 - **ASCII `StringReverse`** (`common.go`) — reversed via `[]rune` (UTF-8 decode + extra allocation); DNS names are ASCII (enforced by `NormalizeQName`), so it now reverses bytewise. Removes an allocation from every name-filter evaluation (`pattern_matcher.go`).
 - **Guarded debug log** (`proxy.go`) — `processIncomingQuery` built `(*clientAddr).String()` on every query for a debug line that is off in production; now gated behind the debug log level.
 
+## Benchmarks
+
+Before/after for the per-query patches, measured on AMD EPYC 7542 with
+`GOMAXPROCS=4`, `GOAMD64=v3`, median of 3 (`go test -run '^$' -bench Perf
+-benchmem -count=3`). The runnable cases live in `dnscrypt-proxy/bench_perf_test.go`
+and `dnscrypt-proxy/bufpool_test.go`.
+
+| Patch | Before | After | Δ |
+|-------|-------:|------:|---|
+| Plugin-globals lock removed | 64.6 ns | **6.8 ns** | **~9.5× faster** |
+| `StringReverse` (`[]rune`→bytewise) | 309.7 ns, 48 B/op | **59.2 ns, 32 B/op** | **~5.2× faster** |
+| Stats: O(n) name scan → pointer | 59.5 ns | **28.4 ns** | **~2.1× faster** |
+| UDP pool key (`String()` ×2→×1) | 325.7 ns, 6 allocs/op | **164.2 ns, 3 allocs/op** | **~2.0× faster, ½ allocs** |
+| `getOne` Lock→RLock (WP2) | 49.7 ns | **38.7 ns** | ~1.3× @4 cores* |
+
+\* The lock-removal/RLock gains grow with core count (the exclusive-lock path
+serializes every query); the 4-core figure understates the scaling benefit.
+
+Pooled hot-path buffers (`bufpool.go`):
+
+| Path | Before | After |
+|------|--------|-------|
+| UDP query buffer | 948.8 ns, 4096 B, 1 alloc | **13.8 ns, 0 B, 0 allocs** |
+| Encrypted response buffer | 948.8 ns, 4096 B, 1 alloc | **13.9 ns, 0 B, 0 allocs** |
+| `NewPluginsState` sessionData map | 1 map alloc/req | **0 allocs** |
+
 ## Building
 
 Built via `dnscrypt-update.sh` (in the parent `nginx-build` dir), which clones this fork's `edge-stable` branch and produces a `GOAMD64=v3`, `CGO_ENABLED=0`, stripped/trimmed binary, then deploys and restarts the service.
