@@ -1,9 +1,7 @@
 package main
 
 import (
-	"math/rand"
 	"net"
-	"time"
 
 	"codeberg.org/miekg/dns"
 	"github.com/jedisct1/dlog"
@@ -140,102 +138,6 @@ func processDoHQuery(
 	return nil, err
 }
 
-// refreshODoHKey claims the per-server refresh slot, drives the actual
-// refresh, and releases the slot under defer so a panic in refreshServer
-// cannot leak the in-flight flag. It returns the refresh error so the
-// caller can propagate it the way the original 401 handler did.
-func refreshODoHKey(proxy *Proxy, serverInfo *ServerInfo, stamp stamps.ServerStamp) error {
-	if !proxy.serversInfo.beginODoHRefresh(serverInfo.Name, 10*time.Second) {
-		dlog.Debugf("Skipping key update for [%v] (refresh in flight or recently failed)", serverInfo.Name)
-		return nil
-	}
-	success := false
-	defer func() { proxy.serversInfo.endODoHRefresh(serverInfo.Name, success) }()
-	dlog.Infof("Forcing key update for [%v]", serverInfo.Name)
-	if err := proxy.serversInfo.refreshServer(proxy, serverInfo.Name, stamp); err != nil {
-		dlog.Noticef("Key update failed for [%v]", serverInfo.Name)
-		serverInfo.noticeFailure(proxy)
-		return err
-	}
-	success = true
-	return nil
-}
-
-// processODoHQuery - Processes a query using the ODoH protocol
-func processODoHQuery(
-	proxy *Proxy,
-	serverInfo *ServerInfo,
-	pluginsState *PluginsState,
-	query []byte,
-) ([]byte, error) {
-	tid := TransactionID(query)
-	if len(serverInfo.odohTargetConfigs) == 0 {
-		return nil, nil
-	}
-
-	serverInfo.noticeBegin(proxy)
-
-	target := serverInfo.odohTargetConfigs[rand.Intn(len(serverInfo.odohTargetConfigs))]
-	odohQuery, err := target.encryptQuery(query)
-	if err != nil {
-		dlog.Errorf("Failed to encrypt query for [%v]", serverInfo.Name)
-		return nil, err
-	}
-
-	targetURL := serverInfo.URL
-	if serverInfo.Relay != nil && serverInfo.Relay.ODoH != nil {
-		targetURL = serverInfo.Relay.ODoH.URL
-	}
-
-	responseBody, responseCode, _, _, err := proxy.xTransport.ObliviousDoHQuery(
-		serverInfo.useGet, targetURL, odohQuery.odohMessage, proxy.timeout)
-
-	if err == nil && len(responseBody) > 0 && responseCode == 200 {
-		response, err := odohQuery.decryptResponse(responseBody)
-		if err != nil {
-			dlog.Warnf("Failed to decrypt response from [%v]", serverInfo.Name)
-			serverInfo.noticeFailure(proxy)
-			return nil, err
-		}
-
-		// Restore the original transaction ID
-		if len(response) >= MinDNSPacketSize {
-			SetTransactionID(response, tid)
-		}
-
-		return response, nil
-	} else if responseCode == 401 || (responseCode == 200 && len(responseBody) == 0) {
-		if responseCode == 200 {
-			dlog.Warnf("ODoH relay for [%v] is buggy and returns a 200 status code instead of 401 after a key update", serverInfo.Name)
-		}
-
-		var stamp stamps.ServerStamp
-		matched := false
-		proxy.serversInfo.RLock()
-		for _, registeredServer := range proxy.serversInfo.registeredServers {
-			if registeredServer.name == serverInfo.Name {
-				stamp = registeredServer.stamp
-				matched = true
-				break
-			}
-		}
-		proxy.serversInfo.RUnlock()
-		if matched {
-			if refreshErr := refreshODoHKey(proxy, serverInfo, stamp); refreshErr != nil {
-				err = refreshErr
-			}
-		}
-	} else {
-		dlog.Warnf("Failed to receive successful response from [%v]", serverInfo.Name)
-	}
-
-	pluginsState.returnCode = PluginsReturnCodeNetworkError
-	pluginsState.ApplyLoggingPlugins(&proxy.pluginsGlobals)
-	serverInfo.noticeFailure(proxy)
-
-	return nil, err
-}
-
 // handleDNSExchange - Handles the DNS exchange with a server
 func handleDNSExchange(
 	proxy *Proxy,
@@ -251,8 +153,6 @@ func handleDNSExchange(
 		response, err = processDNSCryptQuery(proxy, serverInfo, pluginsState, query, serverProto)
 	} else if serverInfo.Proto == stamps.StampProtoTypeDoH {
 		response, err = processDoHQuery(proxy, serverInfo, pluginsState, query)
-	} else if serverInfo.Proto == stamps.StampProtoTypeODoHTarget {
-		response, err = processODoHQuery(proxy, serverInfo, pluginsState, query)
 	} else {
 		dlog.Fatal("Unsupported protocol")
 	}

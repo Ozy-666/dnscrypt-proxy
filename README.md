@@ -38,6 +38,10 @@ The embedded monitoring UI (HTTP + WebSocket + Prometheus server, ~1.3 KLOC and 
 
 `MonitoringUIConfig` is kept as an **inert** struct only so existing configs carrying a `[monitoring_ui]` section still decode (the loader rejects unknown TOML keys). If `enabled = true` is set, the loader logs a warning that the section is ignored.
 
+### ODoH (Oblivious DoH) removed
+
+Oblivious DoH support was stripped: deleted `oblivious_doh.go` (the ODoH config parsing + HPKE-style query encrypt/response decrypt), `XTransport.ObliviousDoHQuery`, `processODoHQuery`/`refreshODoHKey`, the ODoH target-config fetch path (`fetchODoHTargetInfo`/`_fetchODoHTargetInfo`/`fetchTargetConfigsFromWellKnown`), the per-server ODoH key-refresh state on `ServersInfo`, the `ODoHRelay` type and `Relay.ODoH` field, and the `odoh_servers` option (`SourceODoH`). All `StampProtoTypeODoH*` dispatch branches are gone; DNSCrypt anonymization relays are unaffected. This removes the ODoH crypto/wire code and an HTTP content-type path from the attack surface. The `odoh_servers` TOML key is **no longer recognized** — the strict loader rejects it, so it must be removed from existing configs (done in the shipped/example TOML).
+
 ### Offline source lists (no auto-update fetch)
 
 Remote downloading of the `[sources]` resolver/relay lists is **disabled at the binary level** (`sources.go`, `allowSourceDownloads = false`). Sources load exclusively from their local signed cache files (`public-resolvers.md` / `relays.md` + `.minisig`); the proxy never makes outbound HTTP to fetch or refresh them — removing a network dependency and a periodic egress from a privacy resolver. The signed cache files must be present in the working directory (the loader fails closed otherwise). The test suite re-enables downloads to keep exercising the fetch paths. Upstreams are best pinned directly via `[static]` stamps (see *Recommended runtime configuration*) so resolution doesn't depend on the catalog at all.

@@ -890,11 +890,3 @@ func (xTransport *XTransport) DoHQuery(
 	return xTransport.dohLikeQuery("application/dns-message", useGet, url, body, timeout)
 }
 
-func (xTransport *XTransport) ObliviousDoHQuery(
-	useGet bool,
-	url *url.URL,
-	body []byte,
-	timeout time.Duration,
-) ([]byte, int, *tls.ConnectionState, time.Duration, error) {
-	return xTransport.dohLikeQuery("application/oblivious-dns-message", useGet, url, body, timeout)
-}

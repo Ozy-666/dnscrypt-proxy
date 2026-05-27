@@ -103,7 +103,6 @@ type Proxy struct {
 	SourceIPv6                    bool
 	SourceDNSCrypt                bool
 	SourceDoH                     bool
-	SourceODoH                    bool
 	listenersMu                   sync.Mutex
 	ipCryptConfig                 *IPCryptConfig
 	udpConnPool                   *UDPConnPool
@@ -348,8 +347,7 @@ func (proxy *Proxy) updateRegisteredServers() error {
 			)
 		}
 		for _, registeredServer := range registeredServers {
-			if registeredServer.stamp.Proto != stamps.StampProtoTypeDNSCryptRelay &&
-				registeredServer.stamp.Proto != stamps.StampProtoTypeODoHRelay {
+			if registeredServer.stamp.Proto != stamps.StampProtoTypeDNSCryptRelay {
 				if len(proxy.ServerNames) > 0 {
 					if !includesName(proxy.ServerNames, registeredServer.name) {
 						continue
@@ -373,8 +371,7 @@ func (proxy *Proxy) updateRegisteredServers() error {
 					continue
 				}
 			}
-			if registeredServer.stamp.Proto == stamps.StampProtoTypeDNSCryptRelay ||
-				registeredServer.stamp.Proto == stamps.StampProtoTypeODoHRelay {
+			if registeredServer.stamp.Proto == stamps.StampProtoTypeDNSCryptRelay {
 				var found bool
 				for i, currentRegisteredRelay := range proxy.registeredRelays {
 					if currentRegisteredRelay.name == registeredServer.name {
@@ -397,8 +394,7 @@ func (proxy *Proxy) updateRegisteredServers() error {
 				}
 			} else {
 				if !((proxy.SourceDNSCrypt && registeredServer.stamp.Proto == stamps.StampProtoTypeDNSCrypt) ||
-					(proxy.SourceDoH && registeredServer.stamp.Proto == stamps.StampProtoTypeDoH) ||
-					(proxy.SourceODoH && registeredServer.stamp.Proto == stamps.StampProtoTypeODoHTarget)) {
+					(proxy.SourceDoH && registeredServer.stamp.Proto == stamps.StampProtoTypeDoH)) {
 					continue
 				}
 				var found bool

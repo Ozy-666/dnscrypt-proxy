@@ -71,8 +71,8 @@ dnscrypt_servers = true
 # Use servers implementing the DNS-over-HTTPS protocol
 doh_servers = true
 
-# Use servers implementing the Oblivious DoH protocol
-odoh_servers = false
+# Note: Oblivious DoH (ODoH) support has been removed from this edge build;
+# the `odoh_servers` option and ODoH sources/relays are no longer recognized.
 
 
 ## Require servers defined by remote sources to satisfy specific properties
@@ -789,20 +789,7 @@ minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
 refresh_delay = 73
 prefix = ''
 
-### ODoH (Oblivious DoH) servers and relays
-
-# [sources.odoh-servers]
-#   urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/odoh-servers.md', 'https://download.dnscrypt.info/resolvers-list/v3/odoh-servers.md', 'https://cdn.jsdelivr.net/gh/DNSCrypt/dnscrypt-resolvers@master/v3/odoh-servers.md']
-#   cache_file = 'odoh-servers.md'
-#   minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-#   refresh_delay = 73
-#   prefix = ''
-# [sources.odoh-relays]
-#   urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/odoh-relays.md', 'https://download.dnscrypt.info/resolvers-list/v3/odoh-relays.md', 'https://cdn.jsdelivr.net/gh/DNSCrypt/dnscrypt-resolvers@master/v3/odoh-relays.md']
-#   cache_file = 'odoh-relays.md'
-#   minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-#   refresh_delay = 73
-#   prefix = ''
+### ODoH (Oblivious DoH) servers and relays are not supported in this edge build.
 
 ### Quad9
 

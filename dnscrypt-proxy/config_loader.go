@@ -438,7 +438,6 @@ func configureSourceRestrictions(proxy *Proxy, flags *ConfigFlags, config *Confi
 		config.SourceIPv6 = true
 		config.SourceDNSCrypt = true
 		config.SourceDoH = true
-		config.SourceODoH = true
 	}
 
 	var requiredProps stamps.ServerInformalProperties
@@ -459,7 +458,6 @@ func configureSourceRestrictions(proxy *Proxy, flags *ConfigFlags, config *Confi
 	proxy.SourceIPv6 = config.SourceIPv6
 	proxy.SourceDNSCrypt = config.SourceDNSCrypt
 	proxy.SourceDoH = config.SourceDoH
-	proxy.SourceODoH = config.SourceODoH
 }
 
 // determineNetprobeAddress - Determines the address to use for network probing

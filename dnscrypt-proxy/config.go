@@ -78,7 +78,6 @@ type Config struct {
 	SourceRequireNoFilter    bool                        `toml:"require_nofilter"`
 	SourceDNSCrypt           bool                        `toml:"dnscrypt_servers"`
 	SourceDoH                bool                        `toml:"doh_servers"`
-	SourceODoH               bool                        `toml:"odoh_servers"`
 	SourceIPv4               bool                        `toml:"ipv4_servers"`
 	SourceIPv6               bool                        `toml:"ipv6_servers"`
 	MaxClients               uint32                      `toml:"max_clients"`
@@ -139,7 +138,6 @@ func newConfig() Config {
 		SourceIPv6:               false,
 		SourceDNSCrypt:           true,
 		SourceDoH:                true,
-		SourceODoH:               false,
 		MaxClients:               250,
 		TimeoutLoadReduction:     0.75,
 		BootstrapResolvers:       []string{DefaultBootstrapResolver},
@@ -508,10 +506,9 @@ func ConfigLoad(proxy *Proxy, flags *ConfigFlags) error {
 		hasSpecificRoutes := false
 		for _, server := range proxy.registeredServers {
 			if via, ok := (*proxy.routes)[server.name]; ok {
-				if server.stamp.Proto != stamps.StampProtoTypeDNSCrypt &&
-					server.stamp.Proto != stamps.StampProtoTypeODoHTarget {
+				if server.stamp.Proto != stamps.StampProtoTypeDNSCrypt {
 					dlog.Errorf(
-						"DNS anonymization is only supported with the DNSCrypt and ODoH protocols - Connections to [%v] cannot be anonymized",
+						"DNS anonymization is only supported with the DNSCrypt protocol - Connections to [%v] cannot be anonymized",
 						server.name,
 					)
 				} else {
@@ -585,7 +582,7 @@ func (config *Config) printRegisteredServers(proxy *Proxy, jsonOutput bool, incl
 			var hostAddr string
 			hostAddr, port = ExtractHostAndPort(addrStr, port)
 			addrs := make([]string, 0)
-			if (registeredRelay.stamp.Proto == stamps.StampProtoTypeDoH || registeredRelay.stamp.Proto == stamps.StampProtoTypeODoHTarget) &&
+			if registeredRelay.stamp.Proto == stamps.StampProtoTypeDoH &&
 				len(registeredRelay.stamp.ProviderName) > 0 {
 				providerName := registeredRelay.stamp.ProviderName
 				var host string
@@ -597,9 +594,6 @@ func (config *Config) printRegisteredServers(proxy *Proxy, jsonOutput bool, incl
 			}
 			nolog := true
 			nofilter := true
-			if registeredRelay.stamp.Proto == stamps.StampProtoTypeODoHRelay {
-				nolog = registeredRelay.stamp.Props&stamps.ServerInformalPropertyNoLog != 0
-			}
 			serverSummary := ServerSummary{
 				Name:        registeredRelay.name,
 				Proto:       registeredRelay.stamp.Proto.String(),
@@ -623,7 +617,7 @@ func (config *Config) printRegisteredServers(proxy *Proxy, jsonOutput bool, incl
 		var hostAddr string
 		hostAddr, port = ExtractHostAndPort(addrStr, port)
 		addrs := make([]string, 0)
-		if (registeredServer.stamp.Proto == stamps.StampProtoTypeDoH || registeredServer.stamp.Proto == stamps.StampProtoTypeODoHTarget) &&
+		if registeredServer.stamp.Proto == stamps.StampProtoTypeDoH &&
 			len(registeredServer.stamp.ProviderName) > 0 {
 			providerName := registeredServer.stamp.ProviderName
 			var host string
@@ -674,7 +668,7 @@ func (config *Config) loadSources(proxy *Proxy) error {
 	}
 	for name, config := range config.StaticsConfig {
 		if stamp, err := stamps.NewServerStampFromString(config.Stamp); err == nil {
-			if stamp.Proto == stamps.StampProtoTypeDNSCryptRelay || stamp.Proto == stamps.StampProtoTypeODoHRelay {
+			if stamp.Proto == stamps.StampProtoTypeDNSCryptRelay {
 				dlog.Debugf("Adding [%s] to the set of available static relays", name)
 				registeredServer := RegisteredServer{name: name, stamp: stamp, description: "static relay"}
 				proxy.registeredRelays = append(proxy.registeredRelays, registeredServer)
