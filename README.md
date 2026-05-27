@@ -38,6 +38,20 @@ The embedded monitoring UI (HTTP + WebSocket + Prometheus server, ~1.3 KLOC and 
 
 `MonitoringUIConfig` is kept as an **inert** struct only so existing configs carrying a `[monitoring_ui]` section still decode (the loader rejects unknown TOML keys). If `enabled = true` is set, the loader logs a warning that the section is ignored.
 
+### Hot-path lock contention removed
+
+Per-query synchronization was reduced so query throughput scales with cores instead of serializing on shared mutexes:
+
+- **Dead plugin-globals lock removed** (`plugins.go`) — `PluginsGlobals` embeds a `sync.RWMutex` that was read-locked three times per query (query, response, logging plugin loops) but is **never write-locked** anywhere: the plugin slices are built once in `InitPluginsGlobals` before any listener starts and never reassigned (hot reload swaps each plugin's own internal state under the plugin's own lock). Those three `RLock`/`RUnlock` pairs were pure cross-core cache-line traffic and are gone from the hot path. (The startup-only reader in `InitHotReload` keeps the lock, which is why the field remains.)
+- **`getOne()` no longer takes the write lock** (`serversInfo.go`) — every query selected an upstream under `ServersInfo`'s exclusive `Lock()`, serializing all queries. The default WP2 strategy's selection is read-only, so it now uses `RLock()`. The mutating `recoverDormantServers()` that used to run inline on every query was moved to a dedicated 10s maintenance goroutine (`StartProxy`), matching its existing time-gating. Estimator-based strategies keep the write lock.
+- **`updateServerStats()` O(n) scan removed** (`serversInfo.go`) — it locked and linearly scanned the server list by name after every query to find a `*ServerInfo` the caller already held. It now takes the pointer directly (O(1) under the lock).
+
+### Per-query allocation trims
+
+- **UDP connection-pool key reuse** (`udp_conn_pool.go`) — `Get`/`Put` each called `addr.String()`, allocating the same `"ip:port"` string twice per UDP query for a stable upstream. New `GetByKey`/`PutByKey` let `exchangeWithUDPServer` format the key once.
+- **ASCII `StringReverse`** (`common.go`) — reversed via `[]rune` (UTF-8 decode + extra allocation); DNS names are ASCII (enforced by `NormalizeQName`), so it now reverses bytewise. Removes an allocation from every name-filter evaluation (`pattern_matcher.go`).
+- **Guarded debug log** (`proxy.go`) — `processIncomingQuery` built `(*clientAddr).String()` on every query for a debug line that is off in production; now gated behind the debug log level.
+
 ## Building
 
 Built via `dnscrypt-update.sh` (in the parent `nginx-build` dir), which clones this fork's `edge-stable` branch and produces a `GOAMD64=v3`, `CGO_ENABLED=0`, stripped/trimmed binary, then deploys and restarts the service.

@@ -302,6 +302,18 @@ func (proxy *Proxy) StartProxy() {
 			runtime.GC()
 		}
 	}()
+	// Dormant-server recovery used to run under the per-query write lock inside
+	// getOne. It is time-gated to ~10s/1min granularity anyway, so run it on a
+	// dedicated ticker instead, keeping the query hot path off the write lock.
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			proxy.serversInfo.Lock()
+			proxy.serversInfo.recoverDormantServers()
+			proxy.serversInfo.Unlock()
+		}
+	}()
 	if len(proxy.serversInfo.registeredServers) > 0 {
 		go func() {
 			for {
@@ -582,7 +594,8 @@ func (proxy *Proxy) exchangeWithUDPServer(
 		return proxy.exchangeWithUDPServerViaProxy(serverInfo, sharedKey, encryptedQuery, clientNonce, upstreamAddr, proxyDialer)
 	}
 
-	pc, err := proxy.udpConnPool.Get(upstreamAddr)
+	upstreamKey := upstreamAddr.String()
+	pc, err := proxy.udpConnPool.GetByKey(upstreamKey, upstreamAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +635,7 @@ func (proxy *Proxy) exchangeWithUDPServer(
 		return nil, readErr
 	}
 
-	proxy.udpConnPool.Put(upstreamAddr, pc)
+	proxy.udpConnPool.PutByKey(upstreamKey, pc)
 
 	decrypted, err := proxy.Decrypt(serverInfo, sharedKey, encryptedResponse, clientNonce)
 	if err != nil {
@@ -776,12 +789,11 @@ func (proxy *Proxy) processIncomingQuery(
 	start time.Time,
 	onlyCached bool,
 ) []byte {
-	// Initialize metrics for this query
-	clientAddrStr := "unknown"
-	if clientAddr != nil {
-		clientAddrStr = (*clientAddr).String()
+	// (*clientAddr).String() allocates, so only build it when debug logging is
+	// actually enabled instead of on every query.
+	if dlog.LogLevel() == dlog.SeverityDebug && clientAddr != nil {
+		dlog.Debugf("Processing incoming query from %s", (*clientAddr).String())
 	}
-	dlog.Debugf("Processing incoming query from %s", clientAddrStr)
 
 	// Validate the query
 	var response []byte
@@ -868,7 +880,7 @@ func (proxy *Proxy) processIncomingQuery(
 
 			// Update server statistics for WP2 strategy
 			success := (err == nil && exchangeResponse != nil)
-			proxy.serversInfo.updateServerStats(serverName, success)
+			proxy.serversInfo.updateServerStats(serverInfo, success)
 
 			if err != nil || exchangeResponse == nil {
 				return response

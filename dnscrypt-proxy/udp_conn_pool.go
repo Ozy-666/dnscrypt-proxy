@@ -92,7 +92,13 @@ func (p *UDPConnPool) cleanupStale() {
 }
 
 func (p *UDPConnPool) Get(addr *net.UDPAddr) (*net.UDPConn, error) {
-	addrStr := addr.String()
+	return p.GetByKey(addr.String(), addr)
+}
+
+// GetByKey is Get with a caller-supplied address key, so a stable upstream
+// address is formatted to a string once per query instead of once in Get and
+// again in Put.
+func (p *UDPConnPool) GetByKey(addrStr string, addr *net.UDPAddr) (*net.UDPConn, error) {
 	shard := p.getShard(addrStr)
 
 	shard.Lock()
@@ -111,6 +117,11 @@ func (p *UDPConnPool) Get(addr *net.UDPAddr) (*net.UDPConn, error) {
 }
 
 func (p *UDPConnPool) Put(addr *net.UDPAddr, conn *net.UDPConn) {
+	p.PutByKey(addr.String(), conn)
+}
+
+// PutByKey is Put with a caller-supplied address key (see GetByKey).
+func (p *UDPConnPool) PutByKey(addrStr string, conn *net.UDPConn) {
 	if conn == nil {
 		return
 	}
@@ -119,7 +130,6 @@ func (p *UDPConnPool) Put(addr *net.UDPAddr, conn *net.UDPConn) {
 		return
 	}
 
-	addrStr := addr.String()
 	shard := p.getShard(addrStr)
 
 	shard.Lock()

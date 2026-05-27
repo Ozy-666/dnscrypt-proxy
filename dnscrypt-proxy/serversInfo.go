@@ -443,35 +443,39 @@ func (serversInfo *ServersInfo) recoverDormantServers() {
 }
 
 func (serversInfo *ServersInfo) getOne() *ServerInfo {
+	// WP2 (the default strategy) selection is read-only — it only reads RTT and
+	// per-server counters — so take the shared read lock and let concurrent
+	// queries proceed in parallel instead of serializing on the write lock.
+	// recoverDormantServers (a mutator) used to run here on every query; it now
+	// runs on a periodic maintenance goroutine (see StartProxy), keeping the hot
+	// path lock-light. RTT/counter reads stay safe because every write to them
+	// (noticeSuccess/Begin/Failure, updateServerStats) holds the exclusive lock.
+	if _, isWP2 := serversInfo.lbStrategy.(LBStrategyWP2); isWP2 {
+		serversInfo.RLock()
+		serversCount := len(serversInfo.inner)
+		if serversCount <= 0 {
+			serversInfo.RUnlock()
+			return nil
+		}
+		candidate := serversInfo.getWeightedCandidate(serversCount)
+		serverInfo := serversInfo.inner[candidate]
+		serversInfo.RUnlock()
+		return serverInfo
+	}
+
+	// Estimator-based strategies mutate server ordering, so they keep the
+	// exclusive lock.
 	serversInfo.Lock()
+	defer serversInfo.Unlock()
 	serversCount := len(serversInfo.inner)
 	if serversCount <= 0 {
-		serversInfo.Unlock()
 		return nil
 	}
-
-	serversInfo.recoverDormantServers()
-
-	var candidate int
-
-	// Check if using WP2 strategy
-	if _, isWP2 := serversInfo.lbStrategy.(LBStrategyWP2); isWP2 {
-		candidate = serversInfo.getWeightedCandidate(serversCount)
-	} else {
-		candidate = serversInfo.lbStrategy.getCandidate(serversCount)
-		if serversInfo.lbEstimator {
-			serversInfo.estimatorUpdate(candidate)
-		}
+	candidate := serversInfo.lbStrategy.getCandidate(serversCount)
+	if serversInfo.lbEstimator {
+		serversInfo.estimatorUpdate(candidate)
 	}
-
-	serverInfo := serversInfo.inner[candidate]
-	dlog.Debugf("Using candidate [%s] RTT: %d Score: %.3f",
-		serverInfo.Name,
-		int(serverInfo.rtt.Value()),
-		serversInfo.calculateServerScore(serverInfo))
-	serversInfo.Unlock()
-
-	return serverInfo
+	return serversInfo.inner[candidate]
 }
 
 // getWeightedCandidate implements the WP2 algorithm
@@ -536,27 +540,25 @@ func (serversInfo *ServersInfo) calculateServerScore(server *ServerInfo) float64
 	return finalScore
 }
 
-// updateServerStats updates server statistics after each query
-func (serversInfo *ServersInfo) updateServerStats(serverName string, success bool) {
-	serversInfo.Lock()
-	defer serversInfo.Unlock()
-
-	for _, server := range serversInfo.inner {
-		if server.Name == serverName {
-			server.totalQueries++
-			if !success {
-				server.failedQueries++
-			}
-			server.lastUpdateTime = time.Now()
-
-			// Reset counters periodically to prevent overflow and adapt to changes
-			if server.totalQueries > 10000 {
-				server.totalQueries = server.totalQueries / 2
-				server.failedQueries = server.failedQueries / 2
-			}
-			break
-		}
+// updateServerStats updates server statistics after each query. The caller
+// already holds the selected *ServerInfo, so there is no need to re-find it by
+// name under the lock with an O(n) scan.
+func (serversInfo *ServersInfo) updateServerStats(server *ServerInfo, success bool) {
+	if server == nil {
+		return
 	}
+	serversInfo.Lock()
+	server.totalQueries++
+	if !success {
+		server.failedQueries++
+	}
+	server.lastUpdateTime = time.Now()
+	// Reset counters periodically to prevent overflow and adapt to changes
+	if server.totalQueries > 10000 {
+		server.totalQueries /= 2
+		server.failedQueries /= 2
+	}
+	serversInfo.Unlock()
 }
 
 // logWP2Stats logs WP2 performance statistics for debugging

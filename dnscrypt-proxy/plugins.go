@@ -302,12 +302,12 @@ func (pluginsState *PluginsState) ApplyQueryPlugins(
 	pluginsState.qName = qName
 	pluginsState.questionMsg = &msg
 	if len(*pluginsGlobals.queryPlugins) > 0 {
-		pluginsGlobals.RLock()
+		// queryPlugins is built once in InitPluginsGlobals before any listener
+		// starts and is never reassigned, so ranging it needs no lock.
 		for _, plugin := range *pluginsGlobals.queryPlugins {
 			if err := plugin.Eval(pluginsState, &msg); err != nil {
 				dlog.Debugf("Dropping query: %v", err)
 				pluginsState.action = PluginsActionDrop
-				pluginsGlobals.RUnlock()
 				return packet, err
 			}
 			if pluginsState.action == PluginsActionReject {
@@ -324,7 +324,6 @@ func (pluginsState *PluginsState) ApplyQueryPlugins(
 				break
 			}
 		}
-		pluginsGlobals.RUnlock()
 	}
 	if err := msg.Pack(); err != nil {
 		return packet, err
@@ -366,12 +365,11 @@ func (pluginsState *PluginsState) ApplyResponsePlugins(
 	}
 	removeEDNS0Options(&msg)
 	if len(*pluginsGlobals.responsePlugins) > 0 {
-		pluginsGlobals.RLock()
+		// responsePlugins is immutable after InitPluginsGlobals; no lock needed.
 		for _, plugin := range *pluginsGlobals.responsePlugins {
 			if err := plugin.Eval(pluginsState, &msg); err != nil {
 				dlog.Debugf("Dropping response: %v", err)
 				pluginsState.action = PluginsActionDrop
-				pluginsGlobals.RUnlock()
 				return packet, err
 			}
 			if pluginsState.action == PluginsActionReject {
@@ -388,7 +386,6 @@ func (pluginsState *PluginsState) ApplyResponsePlugins(
 				break
 			}
 		}
-		pluginsGlobals.RUnlock()
 	}
 	if err := msg.Pack(); err != nil {
 		return packet, err
@@ -405,8 +402,7 @@ func (pluginsState *PluginsState) ApplyLoggingPlugins(pluginsGlobals *PluginsGlo
 	if questionMsg == nil {
 		return errors.New("Question not found")
 	}
-	pluginsGlobals.RLock()
-	defer pluginsGlobals.RUnlock()
+	// loggingPlugins is immutable after InitPluginsGlobals; no lock needed.
 	for _, plugin := range *pluginsGlobals.loggingPlugins {
 		if err := plugin.Eval(pluginsState, questionMsg); err != nil {
 			return err

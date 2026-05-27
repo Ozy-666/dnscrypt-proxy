@@ -105,11 +105,14 @@ func Max(a, b int) int {
 }
 
 func StringReverse(s string) string {
-	r := []rune(s)
-	for i, j := 0, len(r)-1; i < len(r)/2; i, j = i+1, j-1 {
-		r[i], r[j] = r[j], r[i]
+	// DNS names handled here are ASCII (enforced by NormalizeQName), so reverse
+	// bytewise and skip the []rune decode plus its extra allocation.
+	n := len(s)
+	b := make([]byte, n)
+	for i := 0; i < n; i++ {
+		b[i] = s[n-1-i]
 	}
-	return string(r)
+	return string(b)
 }
 
 func StringTwoFields(str string) (string, string, bool) {
