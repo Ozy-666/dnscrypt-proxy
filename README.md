@@ -147,4 +147,4 @@ from `/proc` once per second.
 
 ## Building
 
-Built via `dnscrypt-update.sh` (in the parent `nginx-build` dir), which clones this fork's `edge-stable` branch and produces a `GOAMD64=v3`, `CGO_ENABLED=0`, stripped/trimmed binary, then deploys and restarts the service.
+Compiled with `GOAMD64=v3` and `CGO_ENABLED=0`, stripped and trimmed, targeting linux/amd64 (AMD EPYC Zen 2).
