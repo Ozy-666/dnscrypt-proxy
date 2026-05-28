@@ -46,6 +46,36 @@ Oblivious DoH support was stripped: deleted `oblivious_doh.go` (the ODoH config 
 
 Remote downloading of the `[sources]` resolver/relay lists is **disabled at the binary level** (`sources.go`, `allowSourceDownloads = false`). Sources load exclusively from their local signed cache files (`public-resolvers.md` / `relays.md` + `.minisig`); the proxy never makes outbound HTTP to fetch or refresh them — removing a network dependency and a periodic egress from a privacy resolver. The signed cache files must be present in the working directory (the loader fails closed otherwise). The test suite re-enables downloads to keep exercising the fetch paths. Upstreams are best pinned directly via `[static]` stamps (see *Recommended runtime configuration*) so resolution doesn't depend on the catalog at all.
 
+### Transport timeouts aligned to the query budget
+
+The HTTP transport's connection-level timeouts were left at a hardcoded 30 s
+default (`DefaultTimeout`) that config never overrode — `xTransport.timeout` was
+the master for the dialer's TCP-connect timeout, `ResponseHeaderTimeout` and
+`ExpectContinueTimeout`, yet only `keepAlive` was wired from the TOML. The toml
+`timeout` (e.g. 800 ms) is now also wired into `xTransport.timeout`
+(`config_loader.go`), so the transport's connection-level timeouts reflect the
+real per-query budget instead of a 30 s ceiling that was mostly shadowed by the
+per-request `http.Client.Timeout` anyway.
+
+The HTTP/2 idle health-check is **decoupled** from that budget so it doesn't
+become an over-aggressive sub-second ping: `ReadIdleTimeout` 30 s → 10 s plus an
+explicit 5 s `PingTimeout` (new `HTTP2ReadIdleTimeout` / `HTTP2PingTimeout`
+constants). Dead keep-alive connections to DoH upstreams are now reaped in ~15 s
+instead of riding the per-query timeout, without pinging idle-but-healthy
+connections every 800 ms. The DNSCrypt UDP/TCP path already used
+`serverInfo.Timeout` (= the toml timeout) and bootstrap DNS keeps its own 5 s
+`ResolverReadTimeout` — both untouched.
+
+### No outbound version-check or auto-update
+
+dnscrypt-proxy v2 has no auto-update or version-announcement call, and this was
+audited and confirmed for the edge build: `-version` prints the local version
+string and exits, the only `http.Client` is the DoH transport (`Fetch`, used for
+queries and the now-disabled source downloads), and `netprobe` is a UDP
+connectivity check. Combined with *Offline source lists* above, a privacy
+resolver makes **zero** discretionary outbound HTTP — only the encrypted DNS
+queries themselves.
+
 ### Hot-path lock contention removed
 
 Per-query synchronization was reduced so query throughput scales with cores instead of serializing on shared mutexes:
@@ -59,6 +89,7 @@ Per-query synchronization was reduced so query throughput scales with cores inst
 - **UDP connection-pool key reuse** (`udp_conn_pool.go`) — `Get`/`Put` each called `addr.String()`, allocating the same `"ip:port"` string twice per UDP query for a stable upstream. New `GetByKey`/`PutByKey` let `exchangeWithUDPServer` format the key once.
 - **ASCII `StringReverse`** (`common.go`) — reversed via `[]rune` (UTF-8 decode + extra allocation); DNS names are ASCII (enforced by `NormalizeQName`), so it now reverses bytewise. Removes an allocation from every name-filter evaluation (`pattern_matcher.go`).
 - **Guarded debug log** (`proxy.go`) — `processIncomingQuery` built `(*clientAddr).String()` on every query for a debug line that is off in production; now gated behind the debug log level.
+- **Precomputed EDNS0 padding** (`dnsutils.go`) — `addEDNS0PaddingIfNoneFound` built the padding hex with `strings.Repeat("58", paddingLen)` on every DoH query (EDNS0 block padding, `paddingLen` 0–63). The `"58"` run is now precomputed once to the block size and sliced from a shared backing string (byte-identical output; falls back to `strings.Repeat` only for the rare larger length, e.g. the unused local-DoH server path). Since WP2 routes the majority of traffic to DoH upstreams, this removes one allocation from the hot path per DoH query.
 
 ## Benchmarks
 
@@ -109,6 +140,24 @@ re-sorts. The per-query selection math (2 RTT reads, a few float divisions, 2
 `rand.Intn`) is negligible, and on Go ≥1.22 without `rand.Seed` the RNG is
 lock-free, so the `RLock` path scales cleanly across all 4 cores. This is a pure
 runtime config change (no rebuild) — applied live to the deployed instance.
+
+**Empirical A/B (live, `127.0.0.1:5053`).** Each strategy was restarted, warmed,
+then measured with an identical sequential latency probe (240 queries) and a
+load test (10 s, 10 concurrent clients); `fastest`/`p2` ran with
+`lb_estimator = true` (their intended mode). WP2 won on **both** axes:
+
+| Strategy | seq p50 | seq p99 | Load QPS | NOERROR |
+|----------|--------:|--------:|---------:|--------:|
+| **`wp2`** (est off) | **4–5 ms** | 9 ms | **2,285** | 100% |
+| `fastest` (est on) | 6 ms | 8 ms | 1,760 | 100% |
+| `p2` (est on) | 6 ms | 15 ms | 1,579 | 100% |
+
+`fastest` pins to whatever server was `inner[0]` at startup (often the 6 ms node,
+not the 4 ms one), while WP2's power-of-two sampling keeps catching the
+momentarily-fastest upstream — so WP2 is the lowest-latency option, not a
+load-spreading compromise. The ~25–30% throughput gap is the exclusive `Lock()`
+(`fastest`/`p2`) serializing selection versus WP2's shared `RLock()`. Conclusion:
+WP2 is both fastest and highest-throughput here; keep it.
 
 Since remote source downloads are disabled (see *Offline source lists*), the
 upstreams are pinned by `[static]` stamp so resolution never depends on the
