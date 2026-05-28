@@ -235,6 +235,13 @@ func hasEDNS0Padding(packet []byte) (bool, error) {
 	return false, nil
 }
 
+// EDNS0 padding byte 0x58 as hex ("58"), precomputed to the block size so the
+// per-query DoH padding path slices a shared backing string instead of
+// allocating via strings.Repeat on every query.
+const maxPrecomputedPaddingLen = 64
+
+var paddingHex58 = strings.Repeat("58", maxPrecomputedPaddingLen)
+
 func addEDNS0PaddingIfNoneFound(msg *dns.Msg, unpaddedPacket []byte, paddingLen int) ([]byte, error) {
 	// Enable EDNS0 if not already enabled
 	if msg.UDPSize == 0 {
@@ -247,7 +254,13 @@ func addEDNS0PaddingIfNoneFound(msg *dns.Msg, unpaddedPacket []byte, paddingLen 
 		}
 	}
 	// Add padding
-	paddingRR := &dns.PADDING{Padding: strings.Repeat("58", paddingLen)}
+	var padding string
+	if paddingLen >= 0 && paddingLen <= maxPrecomputedPaddingLen {
+		padding = paddingHex58[:2*paddingLen]
+	} else {
+		padding = strings.Repeat("58", paddingLen)
+	}
+	paddingRR := &dns.PADDING{Padding: padding}
 	msg.Pseudo = append(msg.Pseudo, paddingRR)
 	if err := msg.Pack(); err != nil {
 		return nil, err
