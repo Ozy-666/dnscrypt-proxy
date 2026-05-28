@@ -94,6 +94,7 @@ func configureXTransport(proxy *Proxy, config *Config) error {
 	proxy.xTransport.useIPv4 = config.SourceIPv4
 	proxy.xTransport.useIPv6 = config.SourceIPv6
 	proxy.xTransport.keepAlive = time.Duration(config.KeepAlive) * time.Second
+	proxy.xTransport.timeout = time.Duration(config.Timeout) * time.Millisecond
 
 	// Configure HTTP proxy URL if specified
 	if len(config.HTTPProxyURL) > 0 {

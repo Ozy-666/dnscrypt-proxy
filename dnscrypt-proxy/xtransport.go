@@ -42,6 +42,8 @@ const (
 	DefaultTimeout              = 30 * time.Second
 	DefaultIdleConnTimeout      = 90 * time.Second
 	DefaultMaxIdleConns         = 16
+	HTTP2ReadIdleTimeout        = 10 * time.Second
+	HTTP2PingTimeout            = 5 * time.Second
 	ResolverReadTimeout         = 5 * time.Second
 	SystemResolverIPTTL         = 12 * time.Hour
 	MinResolverIPTTL            = 4 * time.Hour
@@ -362,7 +364,12 @@ func (xTransport *XTransport) rebuildTransport() {
 	}
 	transport.TLSClientConfig = &tlsClientConfig
 	if http2Transport, _ := http2.ConfigureTransports(transport); http2Transport != nil {
-		http2Transport.ReadIdleTimeout = timeout
+		// Decoupled from the (now ~query-budget) transport timeout: health-check
+		// idle h2 conns on a fixed cadence so dead keep-alive connections are
+		// reaped in ~15s instead of riding the per-query timeout, without pinging
+		// every 800ms.
+		http2Transport.ReadIdleTimeout = HTTP2ReadIdleTimeout
+		http2Transport.PingTimeout = HTTP2PingTimeout
 		http2Transport.AllowHTTP = false
 	}
 	xTransport.transport = transport
