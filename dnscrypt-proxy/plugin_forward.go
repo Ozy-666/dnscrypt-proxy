@@ -399,6 +399,9 @@ func (plugin *PluginForward) Eval(pluginsState *PluginsState, msg *dns.Msg) erro
 			}
 		}
 		cancel()
+		if err := validateResponseQuestion(forwardMsg, respMsg); err != nil {
+			continue
+		}
 		if !respMsg.Security {
 			respMsg.AuthenticatedData = false
 		}
