@@ -350,7 +350,7 @@ func (pluginsState *PluginsState) ApplyResponsePlugins(
 	if err := msg.Unpack(); err != nil {
 		return packet, err
 	}
-	if err := validateResponseQuestion(pluginsState.questionMsg, &msg); err != nil {
+	if err := validateResponseForQuery(pluginsState.questionMsg, &msg); err != nil {
 		return packet, err
 	}
 	switch Rcode(packet) {
@@ -386,6 +386,9 @@ func (pluginsState *PluginsState) ApplyResponsePlugins(
 				break
 			}
 		}
+	}
+	if err := validateResponseForQuery(pluginsState.questionMsg, &msg); err != nil {
+		return packet, err
 	}
 	if err := msg.Pack(); err != nil {
 		return packet, err
