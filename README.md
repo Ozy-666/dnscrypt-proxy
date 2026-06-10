@@ -91,6 +91,14 @@ Per-query synchronization was reduced so query throughput scales with cores inst
 - **Guarded debug log** (`proxy.go`) — `processIncomingQuery` built `(*clientAddr).String()` on every query for a debug line that is off in production; now gated behind the debug log level.
 - **Precomputed EDNS0 padding** (`dnsutils.go`) — `addEDNS0PaddingIfNoneFound` built the padding hex with `strings.Repeat("58", paddingLen)` on every DoH query (EDNS0 block padding, `paddingLen` 0–63). The `"58"` run is now precomputed once to the block size and sliced from a shared backing string (byte-identical output; falls back to `strings.Repeat` only for the rare larger length, e.g. the unused local-DoH server path). Since WP2 routes the majority of traffic to DoH upstreams, this removes one allocation from the hot path per DoH query.
 
+### Security backports & dependency audit (2026-06-10)
+
+Findings from a fork recheck against upstream master and the Go vulnerability database:
+
+- **Response-question validation backported** (upstream commits `fef535cb` + `8de342ea`, post-2.1.16, credited to Kun-Ta Chu) — received DNS responses whose question name, type, or class does not match the original query are now rejected on the central response path, manual DNS exchanges, and DNSCrypt/DoH server probes. `_dnsExchange` additionally verifies the response bit and the response ID. Our transport channels are authenticated (DNSCrypt signatures / DoH TLS), so this guards against a *misbehaving upstream resolver* rather than on-path spoofing — cheap defense-in-depth on the exact query path. The ODoH-probe hunks of the upstream patch were dropped (ODoH is removed in this fork).
+- **`golang.org/x/net` v0.54.0 → v0.55.0** — `govulncheck` flagged [GO-2026-5026](https://pkg.go.dev/vuln/GO-2026-5026) (x/net/idna fails to reject ASCII-only Punycode labels) as *reachable* via `xtransport.go` → `http.Transport` → `idna.ToASCII` on the DoH upstream path. Practical exploitability is low (hostnames come from our static resolver config), fixed by the bump. After it, `govulncheck` reports **0 reachable vulnerabilities**. The re-vendor also dropped the orphaned `go-hpke-compact` dependency left behind by the ODoH strip.
+- **Not backported (verified not applicable):** upstream's cloaking-rule cycle-detection fix (no cloaking rules used) and the TCP-fallback fix for truncated *forwarded* queries (no forwarding rules configured).
+
 ## Benchmarks
 
 Before/after for the per-query patches, measured on AMD EPYC 7542 with
