@@ -165,7 +165,7 @@ func handleDNSExchange(
 		return nil, err
 	}
 
-	if len(response) < MinDNSPacketSize || len(response) > MaxDNSPacketSize {
+	if len(response) < MinDNSPacketSize || len(response) > MaxDNSTCPPacketSize {
 		pluginsState.returnCode = PluginsReturnCodeParseError
 		pluginsState.ApplyLoggingPlugins(&proxy.pluginsGlobals)
 		serverInfo.noticeFailure(proxy)
@@ -231,7 +231,7 @@ func sendResponse(
 	clientAddr *net.Addr,
 	clientPc net.Conn,
 ) {
-	if len(response) < MinDNSPacketSize || len(response) > MaxDNSPacketSize {
+	if len(response) < MinDNSPacketSize || len(response) > MaxDNSTCPPacketSize {
 		if len(response) == 0 {
 			pluginsState.returnCode = PluginsReturnCodeNotReady
 		} else {

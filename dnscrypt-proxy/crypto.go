@@ -143,7 +143,7 @@ func (proxy *Proxy) Decrypt(
 	serverMagicLen := len(ServerMagic)
 	responseHeaderLen := serverMagicLen + NonceSize
 	if len(encrypted) < responseHeaderLen+TagSize+int(MinDNSPacketSize) ||
-		len(encrypted) > responseHeaderLen+TagSize+int(MaxDNSPacketSize) ||
+		len(encrypted) > responseHeaderLen+TagSize+int(MaxDNSTCPPacketSize) ||
 		!bytes.Equal(encrypted[:serverMagicLen], ServerMagic[:]) {
 		return encrypted, errors.New("Invalid message size or prefix")
 	}

@@ -42,7 +42,14 @@ var (
 	MaxDNSPacketSize        = 4096
 	MaxDNSUDPPacketSize     = 4096
 	MaxDNSUDPSafePacketSize = 1252
-	InitialMinQuestionSize  = 512
+	// MaxDNSTCPPacketSize bounds *responses* on TCP transports, where
+	// DNS frames are legal up to 65,535 bytes (RFC 1035 §4.2.2).  The
+	// legacy 4 KiB MaxDNSPacketSize — kept for queries, UDP buffers and
+	// query padding — silently SERVFAILed every larger answer (observed
+	// live: 6,816-byte cisco.com TXT delivered in full by the upstream,
+	// then RST by our own reader).
+	MaxDNSTCPPacketSize    = 65535
+	InitialMinQuestionSize = 512
 )
 
 var (
@@ -67,27 +74,22 @@ func PrefixWithSize(packet []byte) ([]byte, error) {
 }
 
 func ReadPrefixed(conn *net.Conn) ([]byte, error) {
-	buf := make([]byte, 2+MaxDNSPacketSize)
-	packetLength, pos := -1, 0
-	for {
-		readnb, err := (*conn).Read(buf[pos:])
-		if err != nil {
-			return buf, err
-		}
-		pos += readnb
-		if pos >= 2 && packetLength < 0 {
-			packetLength = int(binary.BigEndian.Uint16(buf[0:2]))
-			if packetLength > MaxDNSPacketSize-1 {
-				return buf, errors.New("Packet too large")
-			}
-			if packetLength < MinDNSPacketSize {
-				return buf, errors.New("Packet too short")
-			}
-		}
-		if packetLength >= 0 && pos >= 2+packetLength {
-			return buf[2 : 2+packetLength], nil
-		}
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(*conn, lenBuf[:]); err != nil {
+		return nil, err
 	}
+	packetLength := int(binary.BigEndian.Uint16(lenBuf[:]))
+	if packetLength > MaxDNSTCPPacketSize {
+		return nil, errors.New("Packet too large")
+	}
+	if packetLength < MinDNSPacketSize {
+		return nil, errors.New("Packet too short")
+	}
+	buf := make([]byte, packetLength)
+	if _, err := io.ReadFull(*conn, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 func Min(a, b int) int {
