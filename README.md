@@ -10,6 +10,26 @@ For documentation, configuration reference, and upstream changelog see the [orig
 
 Changes carried in this fork on top of upstream, focused on cutting per-query GC pressure on the hot UDP path and trimming attack surface / binary size:
 
+### 64 KiB TCP response path (`MaxDNSTCPPacketSize`) — fixes >4 KiB SERVFAILs
+
+Upstream's global `MaxDNSPacketSize = 4096` silently broke every DNS answer
+larger than 4 KiB: the upstream server delivered the full response over TCP,
+and the proxy's own reader rejected the frame and reset the connection —
+`SERVFAIL` for the client. Observed live: `cisco.com TXT` (6,816 B,
+88 records), `microsoft.com TXT` (4,890 B), `samsung.com TXT` (4,131 B). Most
+operators never notice because A/AAAA answers are small; big TXT, DNSKEY and
+HTTPS RRsets hit it.
+
+Fix: a separate `MaxDNSTCPPacketSize = 65535` (the RFC 1035 wire maximum)
+applied on the **response path only** — `ReadPrefixed` (rewritten to two
+`io.ReadFull` calls with exact-size allocation, so small responses now
+allocate *less* than the old fixed 4 KiB buffer), the DNSCrypt `Decrypt` size
+gate, and the three response validation gates. Query limits, UDP buffer
+sizes, EDNS advertisements and DNSCrypt query padding deliberately keep the
+4096/1252 limits: raising those would invite fragmentation and padding bloat.
+UDP clients still get standard `TC=1` truncation and recover over TCP — which
+now actually works for >4 KiB answers.
+
 ### Hot-path buffer pooling (`dnscrypt-proxy/bufpool.go`)
 
 Under high QPS the per-query `make([]byte, …)` of the fixed ~4 KiB packet buffers dominated GC pressure. Two `sync.Pool`s now back the live UDP path:
