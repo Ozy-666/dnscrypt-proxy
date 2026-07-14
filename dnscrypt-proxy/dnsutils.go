@@ -26,7 +26,8 @@ func validateResponseQuestion(query, response *dns.Msg) error {
 	qType := dns.RRToType(qQuestion)
 	rType := dns.RRToType(rQuestion)
 	if qType != rType || qHeader.Class != rHeader.Class || !dns.EqualName(qHeader.Name, rHeader.Name) {
-		return fmt.Errorf("Response question does not match query: %s/%d/%d != %s/%d/%d",
+		return fmt.Errorf(
+			"Response question does not match query: %s/%d/%d != %s/%d/%d",
 			rHeader.Name,
 			rType,
 			rHeader.Class,
@@ -259,6 +260,30 @@ func updateTTL(msg *dns.Msg, expiration time.Time) {
 	}
 }
 
+func cloneRRs(src []dns.RR) []dns.RR {
+	if src == nil {
+		return nil
+	}
+	dst := make([]dns.RR, len(src))
+	for i, rr := range src {
+		dst[i] = rr.Clone()
+	}
+	return dst
+}
+
+// Why this exists: miekg/dns/v2 Msg.Copy just does a shallow copy.
+// So, we have to reimplement a clone() function for dns messages.
+func cloneMsg(src *dns.Msg) *dns.Msg {
+	return &dns.Msg{
+		MsgHeader: src.MsgHeader,
+		Question:  cloneRRs(src.Question),
+		Answer:    cloneRRs(src.Answer),
+		Ns:        cloneRRs(src.Ns),
+		Extra:     cloneRRs(src.Extra),
+		Pseudo:    cloneRRs(src.Pseudo),
+	}
+}
+
 func hasEDNS0Padding(packet []byte) (bool, error) {
 	msg := dns.Msg{Data: packet}
 	if err := msg.Unpack(); err != nil {
@@ -272,13 +297,6 @@ func hasEDNS0Padding(packet []byte) (bool, error) {
 	return false, nil
 }
 
-// EDNS0 padding byte 0x58 as hex ("58"), precomputed to the block size so the
-// per-query DoH padding path slices a shared backing string instead of
-// allocating via strings.Repeat on every query.
-const maxPrecomputedPaddingLen = 64
-
-var paddingHex58 = strings.Repeat("58", maxPrecomputedPaddingLen)
-
 func addEDNS0PaddingIfNoneFound(msg *dns.Msg, unpaddedPacket []byte, paddingLen int) ([]byte, error) {
 	// Enable EDNS0 if not already enabled
 	if msg.UDPSize == 0 {
@@ -291,13 +309,7 @@ func addEDNS0PaddingIfNoneFound(msg *dns.Msg, unpaddedPacket []byte, paddingLen 
 		}
 	}
 	// Add padding
-	var padding string
-	if paddingLen >= 0 && paddingLen <= maxPrecomputedPaddingLen {
-		padding = paddingHex58[:2*paddingLen]
-	} else {
-		padding = strings.Repeat("58", paddingLen)
-	}
-	paddingRR := &dns.PADDING{Padding: padding}
+	paddingRR := &dns.PADDING{Padding: strings.Repeat("58", paddingLen)}
 	msg.Pseudo = append(msg.Pseudo, paddingRR)
 	if err := msg.Pack(); err != nil {
 		return nil, err
@@ -360,6 +372,20 @@ type DNSExchangeResponse struct {
 	err              error
 }
 
+// A resolver and an Anonymized DNSCrypt relay both refuse to return a UDP
+// response larger than the request that triggered it, so a post-quantum
+// certificate only comes back over UDP when the certificate probe is padded past
+// the response. A PQ certificate is ~1.3 KB, ~1.5 KB once paired with the classical
+// certificate; during a key rotation the set doubles to two classical plus two PQ
+// certificates, roughly 3 KB. The large probe is padded past that rollover size so
+// PQ discovery keeps working through relays even mid-rotation. The fragments-blocked
+// probe stays small on purpose, so a PQ resolver truncates it and we still learn of
+// PQ support through the TC bit and fall back to TCP.
+const (
+	certProbePaddedLen           = 3200
+	certProbeFragmentsBlockedLen = 480
+)
+
 func DNSExchange(
 	proxy *Proxy,
 	proto string,
@@ -378,7 +404,7 @@ func DNSExchange(
 
 		for tries := range maxTries {
 			if tryFragmentsSupport {
-				queryCopy := query.Copy()
+				queryCopy := cloneMsg(query)
 				queryCopy.ID += uint16(options)
 				go func(query *dns.Msg, delay time.Duration) {
 					time.Sleep(delay)
@@ -386,7 +412,7 @@ func DNSExchange(
 					select {
 					case <-cancelChannel:
 					default:
-						option = _dnsExchange(proxy, proto, query, serverAddress, relay, 1500)
+						option = _dnsExchange(proxy, proto, query, serverAddress, relay, certProbePaddedLen)
 					}
 					option.fragmentsBlocked = false
 					option.priority = 0
@@ -394,7 +420,7 @@ func DNSExchange(
 				}(queryCopy, time.Duration(200*tries)*time.Millisecond)
 				options++
 			}
-			queryCopy := query.Copy()
+			queryCopy := cloneMsg(query)
 			queryCopy.ID += uint16(options)
 			go func(query *dns.Msg, delay time.Duration) {
 				time.Sleep(delay)
@@ -402,7 +428,7 @@ func DNSExchange(
 				select {
 				case <-cancelChannel:
 				default:
-					option = _dnsExchange(proxy, proto, query, serverAddress, relay, 480)
+					option = _dnsExchange(proxy, proto, query, serverAddress, relay, certProbeFragmentsBlockedLen)
 				}
 				option.fragmentsBlocked = true
 				option.priority = 1
@@ -524,7 +550,7 @@ func _dnsExchange(
 		if proxyDialer == nil {
 			pc, err = net.DialTimeout("tcp", upstreamAddr.String(), proxy.timeout)
 		} else {
-			pc, err = (*proxyDialer).Dial("tcp", tcpAddr.String())
+			pc, err = (*proxyDialer).Dial("tcp", upstreamAddr.String())
 		}
 		if err != nil {
 			return DNSExchangeResponse{err: err}

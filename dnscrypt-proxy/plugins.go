@@ -82,7 +82,6 @@ type PluginsState struct {
 	timeout                          time.Duration
 	returnCode                       PluginsReturnCode
 	maxPayloadSize                   int
-	cacheSize                        int
 	originalMaxPayloadSize           int
 	maxUnencryptedUDPSafePayloadSize int
 	rejectTTL                        uint32
@@ -255,7 +254,6 @@ func NewPluginsState(
 		maxPayloadSize:                   MaxDNSUDPPacketSize - ResponseOverhead,
 		clientProto:                      clientProto,
 		clientAddr:                       clientAddr,
-		cacheSize:                        proxy.cacheSize,
 		cacheNegMinTTL:                   proxy.cacheNegMinTTL,
 		cacheNegMaxTTL:                   proxy.cacheNegMaxTTL,
 		cacheMinTTL:                      proxy.cacheMinTTL,
@@ -386,6 +384,9 @@ func (pluginsState *PluginsState) ApplyResponsePlugins(
 				break
 			}
 		}
+	}
+	if err := validateResponseForQuery(pluginsState.questionMsg, &msg); err != nil {
+		return packet, err
 	}
 	if err := validateResponseForQuery(pluginsState.questionMsg, &msg); err != nil {
 		return packet, err

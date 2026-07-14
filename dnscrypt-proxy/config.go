@@ -42,6 +42,7 @@ type Config struct {
 	CertRefreshConcurrency   int                `toml:"cert_refresh_concurrency"`
 	CertRefreshDelay         int                `toml:"cert_refresh_delay"`
 	CertIgnoreTimestamp      bool               `toml:"cert_ignore_timestamp"`
+	PQDNSCrypt               bool               `toml:"pqdnscrypt"`
 	EphemeralKeys            bool               `toml:"dnscrypt_ephemeral_keys"`
 	LBStrategy               string             `toml:"lb_strategy"`
 	LBEstimator              bool               `toml:"lb_estimator"`
@@ -122,6 +123,7 @@ func newConfig() Config {
 		HTTP3:                    false,
 		HTTP3Probe:               false,
 		CertIgnoreTimestamp:      false,
+		PQDNSCrypt:               true,
 		EphemeralKeys:            false,
 		Cache:                    true,
 		CacheSize:                512,
@@ -550,7 +552,8 @@ func configureBrokenImplementations(proxy *Proxy, config *Config) {
 	// Backwards compatibility
 	config.BrokenImplementations.FragmentsBlocked = append(
 		config.BrokenImplementations.FragmentsBlocked,
-		config.BrokenImplementations.BrokenQueryPadding...)
+		config.BrokenImplementations.BrokenQueryPadding...,
+	)
 
 	proxy.serversBlockingFragments = config.BrokenImplementations.FragmentsBlocked
 }

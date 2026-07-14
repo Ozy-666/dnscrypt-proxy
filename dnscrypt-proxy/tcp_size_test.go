@@ -77,7 +77,7 @@ func TestDecryptAcceptsLargeCiphertext(t *testing.T) {
 	}
 	nonce := make([]byte, NonceSize)
 
-	_, err := proxy.Decrypt(serverInfo, &sharedKey, encrypted, nonce)
+	_, err := proxy.Decrypt(serverInfo, &sharedKey, encrypted, nonce, 0)
 	if err == nil {
 		t.Fatal("expected an error (crafted message is not decryptable)")
 	}

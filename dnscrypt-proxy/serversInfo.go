@@ -59,6 +59,9 @@ type ServerInfo struct {
 	ServerPk           [32]byte
 	SharedKey          [32]byte
 	MagicQuery         [8]byte
+	PqPublicKey        []byte
+	PqCertContext      []byte
+	pqSession          *pqSessionState
 	knownBugs          ServerBugs
 	Proto              stamps.StampProtoType
 	useGet             bool
@@ -216,6 +219,8 @@ func (serversInfo *ServersInfo) refreshServer(proxy *Proxy, name string, stamp s
 	}
 	newServer.rtt = ewma.NewMovingAverage(RTTEwmaDecay)
 	newServer.rtt.Set(float64(newServer.initialRtt))
+	proxy.cryptoKeyMu.RLock()
+	proxy.recomputeServerSharedKeyLocked(&newServer)
 	serversInfo.Lock()
 	found := false
 	for i, oldServer := range serversInfo.inner {
@@ -229,6 +234,7 @@ func (serversInfo *ServersInfo) refreshServer(proxy *Proxy, name string, stamp s
 		serversInfo.inner = append(serversInfo.inner, &newServer)
 	}
 	serversInfo.Unlock()
+	proxy.cryptoKeyMu.RUnlock()
 	if !found {
 		proxy.serversInfo.registerServer(name, stamp)
 	}
@@ -735,6 +741,9 @@ func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp
 	if err != nil {
 		return ServerInfo{}, err
 	}
+	if certInfo.CryptoConstruction == XWingPQ {
+		dlog.Noticef("[%v] using the post-quantum X-Wing key exchange", name)
+	}
 	remoteUDPAddr, err := net.ResolveUDPAddr("udp", stamp.ServerAddrStr)
 	if err != nil {
 		return ServerInfo{}, err
@@ -784,6 +793,9 @@ func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp
 		ServerPk:           certInfo.ServerPk,
 		SharedKey:          certInfo.SharedKey,
 		CryptoConstruction: certInfo.CryptoConstruction,
+		PqPublicKey:        certInfo.PqPublicKey,
+		PqCertContext:      certInfo.PqCertContext,
+		pqSession:          newPqSessionState(certInfo.CryptoConstruction),
 		Name:               name,
 		Timeout:            proxy.timeout,
 		UDPAddr:            remoteUDPAddr,
