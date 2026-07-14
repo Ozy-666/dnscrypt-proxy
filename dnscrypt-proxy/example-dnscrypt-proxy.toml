@@ -65,14 +65,14 @@ ipv4_servers = true
 # Use servers reachable over IPv6 -- Do not enable if you don't have IPv6 connectivity
 ipv6_servers = false
 
-# Use servers implementing the DNSCrypt protocol
+# Use servers implementing the DNSCrypt and PQDNSCrypt protocols
 dnscrypt_servers = true
 
 # Use servers implementing the DNS-over-HTTPS protocol
 doh_servers = true
 
-# Use servers implementing the Oblivious DoH protocol
-odoh_servers = false
+# Note: Oblivious DoH (ODoH) support has been removed from this edge build;
+# the `odoh_servers` option and ODoH sources/relays are no longer recognized.
 
 
 ## Require servers defined by remote sources to satisfy specific properties
@@ -275,11 +275,19 @@ cert_refresh_delay = 240
 # cert_ignore_timestamp = false
 
 
-## DNSCrypt: Create a new, unique key for every single DNS query
+## DNSCrypt: Create a new, unique X25519 key pair for every single DNS query
 ## This may improve privacy but can also have a significant impact on CPU usage
 ## Only enable if you don't have a lot of network load
 
 # dnscrypt_ephemeral_keys = false
+
+
+## PQDNSCrypt (DNSCrypt 2026): use post-quantum cryptography when supported
+## by the server.
+## This protects the confidentiality of your queries against future quantum
+## computers ("harvest now, decrypt later").
+
+# pqdnscrypt = true
 
 
 ## DoH: Disable TLS session tickets - increases privacy but also latency
@@ -789,20 +797,7 @@ minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
 refresh_delay = 73
 prefix = ''
 
-### ODoH (Oblivious DoH) servers and relays
-
-# [sources.odoh-servers]
-#   urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/odoh-servers.md', 'https://download.dnscrypt.info/resolvers-list/v3/odoh-servers.md', 'https://cdn.jsdelivr.net/gh/DNSCrypt/dnscrypt-resolvers@master/v3/odoh-servers.md']
-#   cache_file = 'odoh-servers.md'
-#   minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-#   refresh_delay = 73
-#   prefix = ''
-# [sources.odoh-relays]
-#   urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/odoh-relays.md', 'https://download.dnscrypt.info/resolvers-list/v3/odoh-relays.md', 'https://cdn.jsdelivr.net/gh/DNSCrypt/dnscrypt-resolvers@master/v3/odoh-relays.md']
-#   cache_file = 'odoh-relays.md'
-#   minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-#   refresh_delay = 73
-#   prefix = ''
+### ODoH (Oblivious DoH) servers and relays are not supported in this edge build.
 
 ### Quad9
 

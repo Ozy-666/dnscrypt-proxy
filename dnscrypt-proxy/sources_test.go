@@ -231,6 +231,9 @@ func checkTestServer(c *check.C, d *SourceTestData) {
 }
 
 func setupSourceTest(t *testing.T) (func(), *SourceTestData) {
+	// The edge build disables source downloads by default; re-enable them for
+	// the tests that exercise the URL fetch paths.
+	allowSourceDownloads = true
 	d := &SourceTestData{n: -1, xTransport: NewXTransport()}
 	d.cacheTests = map[string]SourceTestState{ // determines cache files written to disk before each call
 		"correct":      TestStateCorrect,
@@ -275,6 +278,7 @@ func setupSourceTest(t *testing.T) (func(), *SourceTestData) {
 	loadTestSourceNames(t, d)
 	loadFixtures(t, d)
 	return func() {
+		allowSourceDownloads = false
 		os.RemoveAll(d.tempDir)
 		d.server.Close()
 	}, d

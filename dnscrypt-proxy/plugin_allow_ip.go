@@ -185,7 +185,7 @@ func (plugin *PluginAllowedIP) Eval(pluginsState *PluginsState, msg *dns.Msg) er
 	}
 
 	if allowed {
-		pluginsState.sessionData["whitelisted"] = true
+		pluginsState.setSessionData("whitelisted", true)
 		if plugin.logger != nil {
 			qName := pluginsState.qName
 			clientIPStr, ok := ExtractClientIPStrEncrypted(pluginsState, plugin.ipCryptConfig)

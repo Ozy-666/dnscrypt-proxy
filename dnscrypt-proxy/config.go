@@ -42,6 +42,7 @@ type Config struct {
 	CertRefreshConcurrency   int                `toml:"cert_refresh_concurrency"`
 	CertRefreshDelay         int                `toml:"cert_refresh_delay"`
 	CertIgnoreTimestamp      bool               `toml:"cert_ignore_timestamp"`
+	PQDNSCrypt               bool               `toml:"pqdnscrypt"`
 	EphemeralKeys            bool               `toml:"dnscrypt_ephemeral_keys"`
 	LBStrategy               string             `toml:"lb_strategy"`
 	LBEstimator              bool               `toml:"lb_estimator"`
@@ -78,7 +79,6 @@ type Config struct {
 	SourceRequireNoFilter    bool                        `toml:"require_nofilter"`
 	SourceDNSCrypt           bool                        `toml:"dnscrypt_servers"`
 	SourceDoH                bool                        `toml:"doh_servers"`
-	SourceODoH               bool                        `toml:"odoh_servers"`
 	SourceIPv4               bool                        `toml:"ipv4_servers"`
 	SourceIPv6               bool                        `toml:"ipv6_servers"`
 	MaxClients               uint32                      `toml:"max_clients"`
@@ -116,14 +116,6 @@ func newConfig() Config {
 		LogFileLatest:   true,
 		ListenAddresses: []string{"127.0.0.1:53"},
 		LocalDoH:        LocalDoHConfig{Path: "/dns-query"},
-		MonitoringUI: MonitoringUIConfig{
-			Enabled:        false,
-			ListenAddress:  "127.0.0.1:8080",
-			Username:       "admin", // Set to empty string to disable authentication
-			Password:       "changeme",
-			EnableQueryLog: false,
-			PrivacyLevel:   2,
-		},
 		Timeout:                  5000,
 		KeepAlive:                5,
 		CertRefreshConcurrency:   10,
@@ -131,6 +123,7 @@ func newConfig() Config {
 		HTTP3:                    false,
 		HTTP3Probe:               false,
 		CertIgnoreTimestamp:      false,
+		PQDNSCrypt:               true,
 		EphemeralKeys:            false,
 		Cache:                    true,
 		CacheSize:                512,
@@ -147,7 +140,6 @@ func newConfig() Config {
 		SourceIPv6:               false,
 		SourceDNSCrypt:           true,
 		SourceDoH:                true,
-		SourceODoH:               false,
 		MaxClients:               250,
 		TimeoutLoadReduction:     0.75,
 		BootstrapResolvers:       []string{DefaultBootstrapResolver},
@@ -266,6 +258,24 @@ type LocalDoHConfig struct {
 	Path            string   `toml:"path"`
 	CertFile        string   `toml:"cert_file"`
 	CertKeyFile     string   `toml:"cert_key_file"`
+}
+
+// MonitoringUIConfig is retained only so existing configs carrying a
+// [monitoring_ui] section still decode (the loader rejects unknown keys). The
+// monitoring UI itself is not built into this edge fork; the section is inert.
+type MonitoringUIConfig struct {
+	Enabled            bool   `toml:"enabled"`
+	ListenAddress      string `toml:"listen_address"`
+	Username           string `toml:"username"`
+	Password           string `toml:"password"`
+	TLSCertificate     string `toml:"tls_certificate"`
+	TLSKey             string `toml:"tls_key"`
+	EnableQueryLog     bool   `toml:"enable_query_log"`
+	PrivacyLevel       int    `toml:"privacy_level"`
+	MaxQueryLogEntries int    `toml:"max_query_log_entries"`
+	MaxMemoryMB        int    `toml:"max_memory_mb"`
+	PrometheusEnabled  bool   `toml:"prometheus_enabled"`
+	PrometheusPath     string `toml:"prometheus_path"`
 }
 
 type ServerSummary struct {
@@ -498,10 +508,9 @@ func ConfigLoad(proxy *Proxy, flags *ConfigFlags) error {
 		hasSpecificRoutes := false
 		for _, server := range proxy.registeredServers {
 			if via, ok := (*proxy.routes)[server.name]; ok {
-				if server.stamp.Proto != stamps.StampProtoTypeDNSCrypt &&
-					server.stamp.Proto != stamps.StampProtoTypeODoHTarget {
+				if server.stamp.Proto != stamps.StampProtoTypeDNSCrypt {
 					dlog.Errorf(
-						"DNS anonymization is only supported with the DNSCrypt and ODoH protocols - Connections to [%v] cannot be anonymized",
+						"DNS anonymization is only supported with the DNSCrypt protocol - Connections to [%v] cannot be anonymized",
 						server.name,
 					)
 				} else {
@@ -543,7 +552,8 @@ func configureBrokenImplementations(proxy *Proxy, config *Config) {
 	// Backwards compatibility
 	config.BrokenImplementations.FragmentsBlocked = append(
 		config.BrokenImplementations.FragmentsBlocked,
-		config.BrokenImplementations.BrokenQueryPadding...)
+		config.BrokenImplementations.BrokenQueryPadding...,
+	)
 
 	proxy.serversBlockingFragments = config.BrokenImplementations.FragmentsBlocked
 }
@@ -575,7 +585,7 @@ func (config *Config) printRegisteredServers(proxy *Proxy, jsonOutput bool, incl
 			var hostAddr string
 			hostAddr, port = ExtractHostAndPort(addrStr, port)
 			addrs := make([]string, 0)
-			if (registeredRelay.stamp.Proto == stamps.StampProtoTypeDoH || registeredRelay.stamp.Proto == stamps.StampProtoTypeODoHTarget) &&
+			if registeredRelay.stamp.Proto == stamps.StampProtoTypeDoH &&
 				len(registeredRelay.stamp.ProviderName) > 0 {
 				providerName := registeredRelay.stamp.ProviderName
 				var host string
@@ -587,9 +597,6 @@ func (config *Config) printRegisteredServers(proxy *Proxy, jsonOutput bool, incl
 			}
 			nolog := true
 			nofilter := true
-			if registeredRelay.stamp.Proto == stamps.StampProtoTypeODoHRelay {
-				nolog = registeredRelay.stamp.Props&stamps.ServerInformalPropertyNoLog != 0
-			}
 			serverSummary := ServerSummary{
 				Name:        registeredRelay.name,
 				Proto:       registeredRelay.stamp.Proto.String(),
@@ -613,7 +620,7 @@ func (config *Config) printRegisteredServers(proxy *Proxy, jsonOutput bool, incl
 		var hostAddr string
 		hostAddr, port = ExtractHostAndPort(addrStr, port)
 		addrs := make([]string, 0)
-		if (registeredServer.stamp.Proto == stamps.StampProtoTypeDoH || registeredServer.stamp.Proto == stamps.StampProtoTypeODoHTarget) &&
+		if registeredServer.stamp.Proto == stamps.StampProtoTypeDoH &&
 			len(registeredServer.stamp.ProviderName) > 0 {
 			providerName := registeredServer.stamp.ProviderName
 			var host string
@@ -664,7 +671,7 @@ func (config *Config) loadSources(proxy *Proxy) error {
 	}
 	for name, config := range config.StaticsConfig {
 		if stamp, err := stamps.NewServerStampFromString(config.Stamp); err == nil {
-			if stamp.Proto == stamps.StampProtoTypeDNSCryptRelay || stamp.Proto == stamps.StampProtoTypeODoHRelay {
+			if stamp.Proto == stamps.StampProtoTypeDNSCryptRelay {
 				dlog.Debugf("Adding [%s] to the set of available static relays", name)
 				registeredServer := RegisteredServer{name: name, stamp: stamp, description: "static relay"}
 				proxy.registeredRelays = append(proxy.registeredRelays, registeredServer)

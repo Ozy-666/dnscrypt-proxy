@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -94,6 +95,7 @@ func configureXTransport(proxy *Proxy, config *Config) error {
 	proxy.xTransport.useIPv4 = config.SourceIPv4
 	proxy.xTransport.useIPv6 = config.SourceIPv6
 	proxy.xTransport.keepAlive = time.Duration(config.KeepAlive) * time.Second
+	proxy.xTransport.timeout = time.Duration(config.Timeout) * time.Millisecond
 
 	// Configure HTTP proxy URL if specified
 	if len(config.HTTPProxyURL) > 0 {
@@ -190,8 +192,11 @@ func configureServerParams(proxy *Proxy, config *Config) {
 	proxy.certRefreshDelay = time.Duration(Max(60, config.CertRefreshDelay)) * time.Minute
 	proxy.certRefreshDelayAfterFailure = 10 * time.Second
 	proxy.certIgnoreTimestamp = config.CertIgnoreTimestamp
+	proxy.pqDNSCrypt = config.PQDNSCrypt
 	proxy.ephemeralKeys = config.EphemeralKeys
-	proxy.monitoringUI = config.MonitoringUI
+	if config.MonitoringUI.Enabled {
+		dlog.Warn("monitoring_ui is enabled in the configuration but this edge build does not include the monitoring UI; the section is ignored")
+	}
 }
 
 // configureLoadBalancing - Configures load balancing strategy
@@ -436,7 +441,6 @@ func configureSourceRestrictions(proxy *Proxy, flags *ConfigFlags, config *Confi
 		config.SourceIPv6 = true
 		config.SourceDNSCrypt = true
 		config.SourceDoH = true
-		config.SourceODoH = true
 	}
 
 	var requiredProps stamps.ServerInformalProperties
@@ -457,15 +461,16 @@ func configureSourceRestrictions(proxy *Proxy, flags *ConfigFlags, config *Confi
 	proxy.SourceIPv6 = config.SourceIPv6
 	proxy.SourceDNSCrypt = config.SourceDNSCrypt
 	proxy.SourceDoH = config.SourceDoH
-	proxy.SourceODoH = config.SourceODoH
 }
 
 // determineNetprobeAddress - Determines the address to use for network probing
 func determineNetprobeAddress(flags *ConfigFlags, config *Config) (string, int) {
 	netprobeTimeout := config.NetprobeTimeout
-	if flags.NetprobeTimeoutOverride != nil {
-		netprobeTimeout = *flags.NetprobeTimeoutOverride
-	}
+	flag.Visit(func(commandLineFlag *flag.Flag) {
+		if commandLineFlag.Name == "netprobe-timeout" && flags.NetprobeTimeoutOverride != nil {
+			netprobeTimeout = *flags.NetprobeTimeoutOverride
+		}
+	})
 
 	netprobeAddress := DefaultNetprobeAddress
 	if len(config.NetprobeAddress) > 0 {

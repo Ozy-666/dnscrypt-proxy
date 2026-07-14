@@ -161,28 +161,39 @@ func fetchFromURL(xTransport *XTransport, u *url.URL) ([]byte, error) {
 	return bin, err
 }
 
+// allowSourceDownloads gates outbound HTTP fetching of resolver/relay source
+// lists. This edge build ships with it disabled: sources are loaded exclusively
+// from their local cache files (public-resolvers.md / relays.md) and the proxy
+// never makes outbound HTTP requests to refresh them. The test suite re-enables
+// it to exercise the download paths.
+var allowSourceDownloads = false
+
 func (source *Source) fetchWithCache(xTransport *XTransport) (time.Duration, error) {
 	now := getCurrentTime()
 	var err error
 	var ttl time.Duration
 	if ttl, err = source.fetchFromCache(); err != nil {
-		if len(source.urls) == 0 {
-			dlog.Errorf("Source [%s] cache file [%s] not present and no valid URL", source.name, source.cacheFile)
+		if len(source.urls) == 0 || !allowSourceDownloads {
+			dlog.Errorf("Source [%s] cache file [%s] not present and remote downloads are disabled", source.name, source.cacheFile)
 			return 0, err
 		}
 		dlog.Debugf("Source [%s] cache file [%s] not present", source.name, source.cacheFile)
 	}
 
-	if len(source.urls) == 0 {
+	if len(source.urls) == 0 || !allowSourceDownloads {
 		return 0, err
 	}
 	if ttl > 0 {
+		source.Lock()
 		source.refresh = now.Add(ttl)
+		source.Unlock()
 		return 0, err
 	}
 
 	ttl = MinimumPrefetchInterval
+	source.Lock()
 	source.refresh = now.Add(ttl)
+	source.Unlock()
 	var bin, sig []byte
 	for _, srcURL := range source.urls {
 		dlog.Infof("Source [%s] loading from URL [%s]", source.name, srcURL)
@@ -208,7 +219,9 @@ func (source *Source) fetchWithCache(xTransport *XTransport) (time.Duration, err
 	}
 	source.updateCache(bin, sig)
 	ttl = source.prefetchDelay
+	source.Lock()
 	source.refresh = now.Add(ttl)
+	source.Unlock()
 	return ttl, nil
 }
 
@@ -264,7 +277,10 @@ func PrefetchSources(xTransport *XTransport, sources []*Source) time.Duration {
 	now := getCurrentTime()
 	interval := MinimumPrefetchInterval
 	for _, source := range sources {
-		if source.refresh.IsZero() || source.refresh.After(now) {
+		source.RLock()
+		refresh := source.refresh
+		source.RUnlock()
+		if refresh.IsZero() || refresh.After(now) {
 			continue
 		}
 		dlog.Debugf("Prefetching [%s]", source.name)

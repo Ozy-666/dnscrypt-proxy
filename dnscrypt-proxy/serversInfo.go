@@ -19,7 +19,6 @@ import (
 	"codeberg.org/miekg/dns"
 	"github.com/VividCortex/ewma"
 	"github.com/jedisct1/dlog"
-	clocksmith "github.com/jedisct1/go-clocksmith"
 	stamps "github.com/jedisct1/go-dnsstamps"
 	"golang.org/x/crypto/ed25519"
 )
@@ -60,10 +59,12 @@ type ServerInfo struct {
 	ServerPk           [32]byte
 	SharedKey          [32]byte
 	MagicQuery         [8]byte
+	PqPublicKey        []byte
+	PqCertContext      []byte
+	pqSession          *pqSessionState
 	knownBugs          ServerBugs
 	Proto              stamps.StampProtoType
 	useGet             bool
-	odohTargetConfigs  []ODoHTargetConfig
 
 	// WP2 strategy fields
 	totalQueries   uint64    // Total queries sent to this server
@@ -149,14 +150,9 @@ type DNSCryptRelay struct {
 	RelayTCPAddr *net.TCPAddr
 }
 
-type ODoHRelay struct {
-	URL *url.URL
-}
-
 type Relay struct {
 	Proto    stamps.StampProtoType
 	Dnscrypt *DNSCryptRelay
-	ODoH     *ODoHRelay
 	Name     string
 }
 
@@ -167,77 +163,15 @@ type ServersInfo struct {
 	registeredRelays    []RegisteredServer
 	lbStrategy          LBStrategy
 	lbEstimator         bool
-	odohRefreshMu       sync.Mutex
-	odohRefreshInFlight map[string]bool
-	odohLastFailureAt   map[string]time.Time
 }
 
 func NewServersInfo() ServersInfo {
 	return ServersInfo{
-		lbStrategy:          DefaultLBStrategy,
-		lbEstimator:         true,
-		registeredServers:   make([]RegisteredServer, 0),
-		registeredRelays:    make([]RegisteredServer, 0),
-		odohRefreshInFlight: make(map[string]bool),
-		odohLastFailureAt:   make(map[string]time.Time),
+		lbStrategy:        DefaultLBStrategy,
+		lbEstimator:       true,
+		registeredServers: make([]RegisteredServer, 0),
+		registeredRelays:  make([]RegisteredServer, 0),
 	}
-}
-
-// beginODoHRefresh returns true if the caller should perform an ODoH key
-// refresh for the named server. It returns false when another refresh is
-// already in flight or when the previous attempt failed within the
-// failureCooldown window. Successful claims must be paired with a call to
-// endODoHRefresh, ideally via defer so a panic in the refresh path does
-// not leak the in-flight slot.
-func (serversInfo *ServersInfo) beginODoHRefresh(name string, failureCooldown time.Duration) bool {
-	now := time.Now()
-	serversInfo.odohRefreshMu.Lock()
-	defer serversInfo.odohRefreshMu.Unlock()
-	if serversInfo.odohRefreshInFlight == nil {
-		serversInfo.odohRefreshInFlight = make(map[string]bool)
-	}
-	if serversInfo.odohLastFailureAt == nil {
-		serversInfo.odohLastFailureAt = make(map[string]time.Time)
-	}
-	if serversInfo.odohRefreshInFlight[name] {
-		return false
-	}
-	if last, ok := serversInfo.odohLastFailureAt[name]; ok && now.Sub(last) < failureCooldown {
-		return false
-	}
-	serversInfo.odohRefreshInFlight[name] = true
-	return true
-}
-
-// endODoHRefresh releases the in-flight slot claimed by beginODoHRefresh and
-// records whether the refresh succeeded. On success the failure timestamp is
-// cleared so the next 401 can trigger a fresh refresh immediately if needed.
-// On failure the timestamp is stamped to throttle a hostile-relay retry
-// loop. Callers that claim a slot but then discover they have no refresh to
-// perform (e.g. the server is no longer registered) should use
-// cancelODoHRefresh instead so the cooldown state is not mutated.
-func (serversInfo *ServersInfo) endODoHRefresh(name string, success bool) {
-	serversInfo.odohRefreshMu.Lock()
-	defer serversInfo.odohRefreshMu.Unlock()
-	delete(serversInfo.odohRefreshInFlight, name)
-	if success {
-		delete(serversInfo.odohLastFailureAt, name)
-	} else {
-		if serversInfo.odohLastFailureAt == nil {
-			serversInfo.odohLastFailureAt = make(map[string]time.Time)
-		}
-		serversInfo.odohLastFailureAt[name] = time.Now()
-	}
-}
-
-// cancelODoHRefresh releases the in-flight slot without touching the failure
-// cooldown. It is used when beginODoHRefresh was claimed but no refresh
-// actually ran, so neither stamping a failure nor clearing a prior one is
-// appropriate.
-func (serversInfo *ServersInfo) cancelODoHRefresh(name string) {
-	serversInfo.odohRefreshMu.Lock()
-	defer serversInfo.odohRefreshMu.Unlock()
-	delete(serversInfo.odohRefreshInFlight, name)
 }
 
 func (serversInfo *ServersInfo) registerServer(name string, stamp stamps.ServerStamp) {
@@ -285,6 +219,8 @@ func (serversInfo *ServersInfo) refreshServer(proxy *Proxy, name string, stamp s
 	}
 	newServer.rtt = ewma.NewMovingAverage(RTTEwmaDecay)
 	newServer.rtt.Set(float64(newServer.initialRtt))
+	proxy.cryptoKeyMu.RLock()
+	proxy.recomputeServerSharedKeyLocked(&newServer)
 	serversInfo.Lock()
 	found := false
 	for i, oldServer := range serversInfo.inner {
@@ -298,6 +234,7 @@ func (serversInfo *ServersInfo) refreshServer(proxy *Proxy, name string, stamp s
 		serversInfo.inner = append(serversInfo.inner, &newServer)
 	}
 	serversInfo.Unlock()
+	proxy.cryptoKeyMu.RUnlock()
 	if !found {
 		proxy.serversInfo.registerServer(name, stamp)
 	}
@@ -443,35 +380,39 @@ func (serversInfo *ServersInfo) recoverDormantServers() {
 }
 
 func (serversInfo *ServersInfo) getOne() *ServerInfo {
+	// WP2 (the default strategy) selection is read-only — it only reads RTT and
+	// per-server counters — so take the shared read lock and let concurrent
+	// queries proceed in parallel instead of serializing on the write lock.
+	// recoverDormantServers (a mutator) used to run here on every query; it now
+	// runs on a periodic maintenance goroutine (see StartProxy), keeping the hot
+	// path lock-light. RTT/counter reads stay safe because every write to them
+	// (noticeSuccess/Begin/Failure, updateServerStats) holds the exclusive lock.
+	if _, isWP2 := serversInfo.lbStrategy.(LBStrategyWP2); isWP2 {
+		serversInfo.RLock()
+		serversCount := len(serversInfo.inner)
+		if serversCount <= 0 {
+			serversInfo.RUnlock()
+			return nil
+		}
+		candidate := serversInfo.getWeightedCandidate(serversCount)
+		serverInfo := serversInfo.inner[candidate]
+		serversInfo.RUnlock()
+		return serverInfo
+	}
+
+	// Estimator-based strategies mutate server ordering, so they keep the
+	// exclusive lock.
 	serversInfo.Lock()
+	defer serversInfo.Unlock()
 	serversCount := len(serversInfo.inner)
 	if serversCount <= 0 {
-		serversInfo.Unlock()
 		return nil
 	}
-
-	serversInfo.recoverDormantServers()
-
-	var candidate int
-
-	// Check if using WP2 strategy
-	if _, isWP2 := serversInfo.lbStrategy.(LBStrategyWP2); isWP2 {
-		candidate = serversInfo.getWeightedCandidate(serversCount)
-	} else {
-		candidate = serversInfo.lbStrategy.getCandidate(serversCount)
-		if serversInfo.lbEstimator {
-			serversInfo.estimatorUpdate(candidate)
-		}
+	candidate := serversInfo.lbStrategy.getCandidate(serversCount)
+	if serversInfo.lbEstimator {
+		serversInfo.estimatorUpdate(candidate)
 	}
-
-	serverInfo := serversInfo.inner[candidate]
-	dlog.Debugf("Using candidate [%s] RTT: %d Score: %.3f",
-		serverInfo.Name,
-		int(serverInfo.rtt.Value()),
-		serversInfo.calculateServerScore(serverInfo))
-	serversInfo.Unlock()
-
-	return serverInfo
+	return serversInfo.inner[candidate]
 }
 
 // getWeightedCandidate implements the WP2 algorithm
@@ -536,27 +477,25 @@ func (serversInfo *ServersInfo) calculateServerScore(server *ServerInfo) float64
 	return finalScore
 }
 
-// updateServerStats updates server statistics after each query
-func (serversInfo *ServersInfo) updateServerStats(serverName string, success bool) {
-	serversInfo.Lock()
-	defer serversInfo.Unlock()
-
-	for _, server := range serversInfo.inner {
-		if server.Name == serverName {
-			server.totalQueries++
-			if !success {
-				server.failedQueries++
-			}
-			server.lastUpdateTime = time.Now()
-
-			// Reset counters periodically to prevent overflow and adapt to changes
-			if server.totalQueries > 10000 {
-				server.totalQueries = server.totalQueries / 2
-				server.failedQueries = server.failedQueries / 2
-			}
-			break
-		}
+// updateServerStats updates server statistics after each query. The caller
+// already holds the selected *ServerInfo, so there is no need to re-find it by
+// name under the lock with an O(n) scan.
+func (serversInfo *ServersInfo) updateServerStats(server *ServerInfo, success bool) {
+	if server == nil {
+		return
 	}
+	serversInfo.Lock()
+	server.totalQueries++
+	if !success {
+		server.failedQueries++
+	}
+	server.lastUpdateTime = time.Now()
+	// Reset counters periodically to prevent overflow and adapt to changes
+	if server.totalQueries > 10000 {
+		server.totalQueries /= 2
+		server.failedQueries /= 2
+	}
+	serversInfo.Unlock()
 }
 
 // logWP2Stats logs WP2 performance statistics for debugging
@@ -586,8 +525,6 @@ func fetchServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isNew 
 		return fetchDNSCryptServerInfo(proxy, name, stamp, isNew)
 	} else if stamp.Proto == stamps.StampProtoTypeDoH {
 		return fetchDoHServerInfo(proxy, name, stamp, isNew)
-	} else if stamp.Proto == stamps.StampProtoTypeODoHTarget {
-		return fetchODoHTargetInfo(proxy, name, stamp, isNew)
 	}
 	return ServerInfo{}, fmt.Errorf("Unsupported protocol for [%s]: [%s]", name, stamp.Proto.String())
 }
@@ -608,20 +545,8 @@ func findFarthestRoute(proxy *Proxy, name string, relayStamps []stamps.ServerSta
 	server := proxy.serversInfo.registeredServers[serverIdx]
 	proxy.serversInfo.RUnlock()
 
-	// Fall back to random relays until the logic is implemented for non-DNSCrypt relays
-	if server.stamp.Proto == stamps.StampProtoTypeODoHTarget {
-		candidates := make([]int, 0)
-		for relayIdx, relayStamp := range relayStamps {
-			if relayStamp.Proto != stamps.StampProtoTypeODoHRelay {
-				continue
-			}
-			candidates = append(candidates, relayIdx)
-		}
-		if len(candidates) == 0 {
-			return nil
-		}
-		return &relayStamps[candidates[rand.Intn(len(candidates))]]
-	} else if server.stamp.Proto != stamps.StampProtoTypeDNSCrypt {
+	// Only DNSCrypt relays are supported.
+	if server.stamp.Proto != stamps.StampProtoTypeDNSCrypt {
 		return nil
 	}
 
@@ -678,8 +603,6 @@ func relayProtoForServerProto(proto stamps.StampProtoType) (stamps.StampProtoTyp
 	switch proto {
 	case stamps.StampProtoTypeDNSCrypt:
 		return stamps.StampProtoTypeDNSCryptRelay, nil
-	case stamps.StampProtoTypeODoHTarget:
-		return stamps.StampProtoTypeODoHRelay, nil
 	default:
 		return 0, errors.New("protocol cannot be anonymized")
 	}
@@ -766,42 +689,6 @@ func route(proxy *Proxy, name string, serverProto stamps.StampProtoType) (*Relay
 			Dnscrypt: &DNSCryptRelay{RelayUDPAddr: relayUDPAddr, RelayTCPAddr: relayTCPAddr},
 			Name:     relayName,
 		}, nil
-	case stamps.StampProtoTypeODoHRelay:
-		relayBaseURL, err := url.Parse(
-			"https://" + url.PathEscape(relayCandidateStamp.ProviderName) + relayCandidateStamp.Path,
-		)
-		if err != nil {
-			return nil, err
-		}
-		var relayURLforTarget *url.URL
-		proxy.serversInfo.RLock()
-		for _, server := range proxy.serversInfo.registeredServers {
-			if server.name != name || server.stamp.Proto != stamps.StampProtoTypeODoHTarget {
-				continue
-			}
-			qs := relayBaseURL.Query()
-			qs.Add("targethost", server.stamp.ProviderName)
-			qs.Add("targetpath", server.stamp.Path)
-			tmp := *relayBaseURL
-			tmp.RawQuery = qs.Encode()
-			relayURLforTarget = &tmp
-			break
-		}
-		proxy.serversInfo.RUnlock()
-		if relayURLforTarget == nil {
-			return nil, fmt.Errorf("Relay [%v] not found", relayName)
-		}
-		if len(relayCandidateStamp.ServerAddrStr) > 0 {
-			ipOnly, _ := ExtractHostAndPort(relayCandidateStamp.ServerAddrStr, -1)
-			if ip := ParseIP(ipOnly); ip != nil {
-				host, _ := ExtractHostAndPort(relayCandidateStamp.ProviderName, -1)
-				proxy.xTransport.saveCachedIP(host, ip, -1*time.Second)
-			}
-		}
-		dlog.Noticef("Anonymizing queries for [%v] via [%v]", name, relayName)
-		return &Relay{Proto: stamps.StampProtoTypeODoHRelay, ODoH: &ODoHRelay{
-			URL: relayURLforTarget,
-		}, Name: relayName}, nil
 	}
 	return nil, fmt.Errorf("Invalid relay set for server [%v]", name)
 }
@@ -854,6 +741,9 @@ func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp
 	if err != nil {
 		return ServerInfo{}, err
 	}
+	if certInfo.CryptoConstruction == XWingPQ {
+		dlog.Noticef("[%v] using the post-quantum X-Wing key exchange", name)
+	}
 	remoteUDPAddr, err := net.ResolveUDPAddr("udp", stamp.ServerAddrStr)
 	if err != nil {
 		return ServerInfo{}, err
@@ -874,30 +764,24 @@ func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp
 			&name,
 			false,
 		)
-		if err == nil && len(msg.Question) > 0 {
-			question := msg.Question[0]
-			if dns.RRToType(question) == dns.RRToType(query.Question[0]) && strings.EqualFold(question.Header().Name, query.Question[0].Header().Name) {
-				dlog.Debugf("[%s] also serves plaintext DNS", name)
-				if msg.ID != 0xcafe {
-					dlog.Infof("[%s] handling of DNS message identifiers is broken", name)
+		if err == nil {
+			dlog.Debugf("[%s] also serves plaintext DNS", name)
+			for _, rr := range msg.Answer {
+				rrType := dns.RRToType(rr)
+				if rrType == dns.TypeA || rrType == dns.TypeAAAA {
+					dlog.Warnf("[%s] may be a lying resolver -- skipping", name)
+					return ServerInfo{}, fmt.Errorf("[%s] unexpected record: [%s]", name, rr.String())
 				}
-				for _, rr := range msg.Answer {
-					rrType := dns.RRToType(rr)
-					if rrType == dns.TypeA || rrType == dns.TypeAAAA {
-						dlog.Warnf("[%s] may be a lying resolver -- skipping", name)
-						return ServerInfo{}, fmt.Errorf("[%s] unexpected record: [%s]", name, rr.String())
+			}
+			for _, rr := range msg.Extra {
+				if dns.RRToType(rr) == dns.TypeTXT {
+					dlog.Warnf("[%s] may be a dummy resolver -- skipping", name)
+					txts := rr.(*dns.TXT).Txt
+					cause := ""
+					if len(txts) > 0 {
+						cause = txts[0]
 					}
-				}
-				for _, rr := range msg.Extra {
-					if dns.RRToType(rr) == dns.TypeTXT {
-						dlog.Warnf("[%s] may be a dummy resolver -- skipping", name)
-						txts := rr.(*dns.TXT).Txt
-						cause := ""
-						if len(txts) > 0 {
-							cause = txts[0]
-						}
-						return ServerInfo{}, fmt.Errorf("[%s] unexpected record: [%s]", name, cause)
-					}
+					return ServerInfo{}, fmt.Errorf("[%s] unexpected record: [%s]", name, cause)
 				}
 			}
 		}
@@ -909,6 +793,9 @@ func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp
 		ServerPk:           certInfo.ServerPk,
 		SharedKey:          certInfo.SharedKey,
 		CryptoConstruction: certInfo.CryptoConstruction,
+		PqPublicKey:        certInfo.PqPublicKey,
+		PqCertContext:      certInfo.PqCertContext,
+		pqSession:          newPqSessionState(certInfo.CryptoConstruction),
 		Name:               name,
 		Timeout:            proxy.timeout,
 		UDPAddr:            remoteUDPAddr,
@@ -919,7 +806,7 @@ func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp
 	}, nil
 }
 
-func dohTestPacket(msgID uint16) []byte {
+func dohTestPacket(msgID uint16) *dns.Msg {
 	msg := dns.NewMsg(".", dns.TypeNS)
 	msg.ID = msgID
 	msg.RecursionDesired = true
@@ -932,10 +819,10 @@ func dohTestPacket(msgID uint16) []byte {
 	if err := msg.Pack(); err != nil {
 		dlog.Fatal(err)
 	}
-	return msg.Data
+	return msg
 }
 
-func dohNXTestPacket(msgID uint16) []byte {
+func dohNXTestPacket(msgID uint16) *dns.Msg {
 	qName := make([]byte, 16)
 	charset := "abcdefghijklmnopqrstuvwxyz"
 	for i := range qName {
@@ -953,7 +840,7 @@ func dohNXTestPacket(msgID uint16) []byte {
 	if err := msg.Pack(); err != nil {
 		dlog.Fatal(err)
 	}
-	return msg.Data
+	return msg
 }
 
 func plainNXTestPacket(msgID uint16) *dns.Msg {
@@ -985,7 +872,7 @@ func fetchDoHServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isN
 		Host:   stamp.ProviderName,
 		Path:   stamp.Path,
 	}
-	body := dohTestPacket(0xcafe)
+	body := dohTestPacket(0xcafe).Data
 	useGet := false
 	if _, _, _, _, err := proxy.xTransport.DoHQuery(useGet, url, body, proxy.timeout); err != nil {
 		useGet = true
@@ -994,8 +881,8 @@ func fetchDoHServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isN
 		}
 		dlog.Debugf("Server [%s] doesn't appear to support POST; falling back to GET requests", name)
 	}
-	body = dohNXTestPacket(0xcafe)
-	serverResponse, _, tls, rtt, err := proxy.xTransport.DoHQuery(useGet, url, body, proxy.timeout)
+	queryMsg := dohNXTestPacket(0xcafe)
+	serverResponse, _, tls, rtt, err := proxy.xTransport.DoHQuery(useGet, url, queryMsg.Data, proxy.timeout)
 	if err != nil {
 		dlog.Infof("[%s] [%s]: %v", name, url, err)
 		return ServerInfo{}, err
@@ -1006,6 +893,9 @@ func fetchDoHServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isN
 	msg := dns.Msg{Data: serverResponse}
 	if err := msg.Unpack(); err != nil {
 		dlog.Warnf("[%s]: %v", name, err)
+		return ServerInfo{}, err
+	}
+	if err := validateResponseForQuery(queryMsg, &msg); err != nil {
 		return ServerInfo{}, err
 	}
 	if msg.Rcode != dns.RcodeNameError {
@@ -1066,202 +956,6 @@ func fetchDoHServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isN
 		initialRtt: xrtt,
 		useGet:     useGet,
 	}, nil
-}
-
-func fetchTargetConfigsFromWellKnown(proxy *Proxy, url *url.URL) ([]ODoHTargetConfig, error) {
-	bin, statusCode, _, _, err := proxy.xTransport.Get(url, "application/binary", 0)
-	if err != nil {
-		return nil, err
-	}
-	if statusCode < 200 || statusCode >= 300 {
-		return nil, fmt.Errorf("HTTP status code was %v", statusCode)
-	}
-	return parseODoHTargetConfigs(bin)
-}
-
-func _fetchODoHTargetInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isNew bool) (ServerInfo, error) {
-	configURL := &url.URL{Scheme: "https", Host: stamp.ProviderName, Path: "/.well-known/odohconfigs"}
-	odohTargetConfigs, err := fetchTargetConfigsFromWellKnown(proxy, configURL)
-	if err != nil {
-		dlog.Debug(configURL)
-		return ServerInfo{}, fmt.Errorf("[%s] didn't return an ODoH configuration - [%v]", name, err)
-	} else if len(odohTargetConfigs) == 0 {
-		dlog.Debug(configURL)
-		return ServerInfo{}, fmt.Errorf("[%s] has an empty ODoH configuration", name)
-	}
-
-	relay, err := route(proxy, name, stamp.Proto)
-	if err != nil {
-		return ServerInfo{}, err
-	}
-
-	if relay == nil {
-		dlog.Criticalf(
-			"No relay defined for [%v] - Configuring an ODoH relay is required for ODoH servers (see the `[anonymized_dns]` section)",
-			name,
-		)
-		return ServerInfo{}, errors.New("No ODoH relay")
-	} else {
-		if relay.ODoH == nil {
-			dlog.Criticalf("Wrong relay type defined for [%v] - ODoH servers require an ODoH relay", name)
-			return ServerInfo{}, errors.New("Wrong ODoH relay type")
-		}
-	}
-
-	dlog.Debugf("Pausing after ODoH configuration retrieval")
-	delay := time.Duration(rand.Intn(5*1000)) * time.Millisecond
-	clocksmith.Sleep(time.Duration(delay))
-	dlog.Debugf("Pausing done")
-
-	targetURL := &url.URL{
-		Scheme: "https",
-		Host:   stamp.ProviderName,
-		Path:   stamp.Path,
-	}
-
-	workingConfigs := make([]ODoHTargetConfig, 0)
-	rand.Shuffle(len(odohTargetConfigs), func(i, j int) {
-		odohTargetConfigs[i], odohTargetConfigs[j] = odohTargetConfigs[j], odohTargetConfigs[i]
-	})
-	for _, odohTargetConfig := range odohTargetConfigs {
-		url := relay.ODoH.URL
-
-		query := dohTestPacket(0xcafe)
-		odohQuery, err := odohTargetConfig.encryptQuery(query)
-		if err != nil {
-			continue
-		}
-
-		useGet := false
-		if _, _, _, _, err := proxy.xTransport.ObliviousDoHQuery(useGet, url, odohQuery.odohMessage, proxy.timeout); err != nil {
-			useGet = true
-			if _, _, _, _, err := proxy.xTransport.ObliviousDoHQuery(useGet, url, odohQuery.odohMessage, proxy.timeout); err != nil {
-				continue
-			}
-			dlog.Debugf("Server [%s] doesn't appear to support POST; falling back to GET requests", name)
-		}
-
-		query = dohNXTestPacket(0xcafe)
-		odohQuery, err = odohTargetConfig.encryptQuery(query)
-		if err != nil {
-			continue
-		}
-
-		responseBody, responseCode, tls, rtt, err := proxy.xTransport.ObliviousDoHQuery(
-			useGet,
-			url,
-			odohQuery.odohMessage,
-			proxy.timeout,
-		)
-		if err != nil {
-			continue
-		}
-		if responseCode == 401 {
-			return ServerInfo{}, fmt.Errorf("Configuration changed during a probe")
-		}
-		serverResponse, err := odohQuery.decryptResponse(responseBody)
-		if err != nil {
-			dlog.Warnf("Unable to decrypt response from [%v]: [%v]", name, err)
-			continue
-		}
-		workingConfigs = append(workingConfigs, odohTargetConfig)
-
-		msg := dns.Msg{Data: serverResponse}
-		if err := msg.Unpack(); err != nil {
-			dlog.Warnf("[%s]: %v", name, err)
-			return ServerInfo{}, err
-		}
-		if msg.Rcode != dns.RcodeNameError {
-			return ServerInfo{}, fmt.Errorf("[%s] may be a lying resolver -- skipping", name)
-		}
-		protocol := "http"
-		tlsVersion := uint16(0)
-		tlsCipherSuite := uint16(0)
-		if tls != nil {
-			protocol = tls.NegotiatedProtocol
-			if len(protocol) == 0 {
-				protocol = "http/1.x"
-			} else {
-				tlsVersion = tls.Version
-				tlsCipherSuite = tls.CipherSuite
-			}
-		}
-		if strings.HasPrefix(protocol, "http/1.") {
-			dlog.Warnf("[%s] does not support HTTP/2", name)
-		}
-		dlog.Infof(
-			"[%s] TLS version: %x - Protocol: %v - Cipher suite: %v",
-			name,
-			tlsVersion,
-			protocol,
-			tlsCipherSuite,
-		)
-		showCerts := proxy.showCerts
-		found := false
-		var wantedHash [32]byte
-		if tls != nil {
-			for _, cert := range tls.PeerCertificates {
-				h := sha256.Sum256(cert.RawTBSCertificate)
-				if showCerts {
-					dlog.Noticef("Advertised relay cert: [%s] [%x]", cert.Subject, h)
-				} else {
-					dlog.Debugf("Advertised relay cert: [%s] [%x]", cert.Subject, h)
-				}
-				for _, hash := range stamp.Hashes {
-					if len(hash) == len(wantedHash) {
-						copy(wantedHash[:], hash)
-						if h == wantedHash {
-							found = true
-							break
-						}
-					}
-				}
-				if found {
-					break
-				}
-			}
-			if !found && len(stamp.Hashes) > 0 {
-				dlog.Criticalf("[%s] Certificate hash [%x] not found", name, wantedHash)
-				return ServerInfo{}, fmt.Errorf("Certificate hash not found")
-			}
-		}
-		if len(serverResponse) < MinDNSPacketSize || len(serverResponse) > MaxDNSPacketSize ||
-			serverResponse[0] != 0xca || serverResponse[1] != 0xfe || serverResponse[4] != 0x00 || serverResponse[5] != 0x01 {
-			dlog.Info("Webserver returned an unexpected response")
-			return ServerInfo{}, errors.New("Webserver returned an unexpected response")
-		}
-		xrtt := int(rtt.Nanoseconds() / 1000000)
-		if isNew {
-			dlog.Noticef("[%s] OK (ODoH) - rtt: %dms", name, xrtt)
-		} else {
-			dlog.Infof("[%s] OK (ODoH) - rtt: %dms", name, xrtt)
-		}
-		return ServerInfo{
-			Proto:             stamps.StampProtoTypeODoHTarget,
-			Name:              name,
-			Timeout:           proxy.timeout,
-			URL:               targetURL,
-			HostName:          stamp.ProviderName,
-			initialRtt:        xrtt,
-			useGet:            useGet,
-			Relay:             relay,
-			odohTargetConfigs: workingConfigs,
-		}, nil
-	}
-	return ServerInfo{}, fmt.Errorf("No valid network configuration for [%v]", name)
-}
-
-func fetchODoHTargetInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isNew bool) (ServerInfo, error) {
-	var err error
-	var serverInfo ServerInfo
-	for i := 0; i < 3; i += 1 {
-		serverInfo, err = _fetchODoHTargetInfo(proxy, name, stamp, isNew)
-		if err == nil {
-			break
-		}
-		dlog.Infof("Trying to fetch the [%v] configuration again", name)
-	}
-	return serverInfo, err
 }
 
 func (serverInfo *ServerInfo) noticeFailure(proxy *Proxy) {
