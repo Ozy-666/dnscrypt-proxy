@@ -158,11 +158,11 @@ type Relay struct {
 
 type ServersInfo struct {
 	sync.RWMutex
-	inner               []*ServerInfo
-	registeredServers   []RegisteredServer
-	registeredRelays    []RegisteredServer
-	lbStrategy          LBStrategy
-	lbEstimator         bool
+	inner             []*ServerInfo
+	registeredServers []RegisteredServer
+	registeredRelays  []RegisteredServer
+	lbStrategy        LBStrategy
+	lbEstimator       bool
 }
 
 func NewServersInfo() ServersInfo {

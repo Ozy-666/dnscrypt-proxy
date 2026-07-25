@@ -112,10 +112,10 @@ type Config struct {
 
 func newConfig() Config {
 	return Config{
-		LogLevel:        int(dlog.LogLevel()),
-		LogFileLatest:   true,
-		ListenAddresses: []string{"127.0.0.1:53"},
-		LocalDoH:        LocalDoHConfig{Path: "/dns-query"},
+		LogLevel:                 int(dlog.LogLevel()),
+		LogFileLatest:            true,
+		ListenAddresses:          []string{"127.0.0.1:53"},
+		LocalDoH:                 LocalDoHConfig{Path: "/dns-query"},
 		Timeout:                  5000,
 		KeepAlive:                5,
 		CertRefreshConcurrency:   10,

@@ -961,4 +961,3 @@ func (xTransport *XTransport) DoHQuery(
 ) ([]byte, int, *tls.ConnectionState, time.Duration, error) {
 	return xTransport.dohLikeQuery("application/dns-message", useGet, url, body, timeout)
 }
-
