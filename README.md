@@ -1,8 +1,8 @@
 # dnscrypt-proxy (edge fork)
 
-Fork of [DNSCrypt/dnscrypt-proxy](https://github.com/DNSCrypt/dnscrypt-proxy) — Linux/amd64 only, built with `GOAMD64=v3` for AMD EPYC Zen 2.
+Fork of [DNSCrypt/dnscrypt-proxy](https://github.com/DNSCrypt/dnscrypt-proxy) — Linux/amd64 only, built with `GOAMD64=v3` for AMD EPYC Zen 2. Currently rebased on upstream **2.1.18** (2026-07-18).
 
-Part of the `adguardhome-edge` stack: AGH-Edge → Unbound → dnscrypt-proxy → upstream resolvers (Cloudflare / Quad9 / Google over DNSCrypt + DoH). Stack specification and the AGH-Edge component live at [Ozy-666/AdGuardHome-edge-spec](https://github.com/Ozy-666/AdGuardHome-edge-spec).
+Part of the `adguardhome-edge` stack: AGH-Edge → Unbound → dnscrypt-proxy → upstream resolvers (Cloudflare over DoH + Quad9 over DNSCrypt; Google was dropped for privacy). Stack specification and the AGH-Edge component live at [Ozy-666/AdGuardHome-edge-spec](https://github.com/Ozy-666/AdGuardHome-edge-spec).
 
 For documentation, configuration reference, and upstream changelog see the [original repository](https://github.com/DNSCrypt/dnscrypt-proxy).
 
@@ -24,7 +24,10 @@ Fix: a separate `MaxDNSTCPPacketSize = 65535` (the RFC 1035 wire maximum)
 applied on the **response path only** — `ReadPrefixed` (rewritten to two
 `io.ReadFull` calls with exact-size allocation, so small responses now
 allocate *less* than the old fixed 4 KiB buffer), the DNSCrypt `Decrypt` size
-gate, and the three response validation gates. Query limits, UDP buffer
+gate, and the three response validation gates. Since 2.1.18 `ReadPrefixed`
+takes `net.Conn` by value rather than `*net.Conn`, so it composes with
+upstream's `firstReadConn` timing wrapper; the first `io.ReadFull` (the 2-byte
+length prefix) is what trips that wrapper's time-to-first-byte stamp. Query limits, UDP buffer
 sizes, EDNS advertisements and DNSCrypt query padding deliberately keep the
 4096/1252 limits: raising those would invite fragmentation and padding bloat.
 UDP clients still get standard `TC=1` truncation and recover over TCP — which
@@ -119,6 +122,37 @@ Findings from a fork recheck against upstream master and the Go vulnerability da
 - **`golang.org/x/net` v0.54.0 → v0.55.0** — `govulncheck` flagged [GO-2026-5026](https://pkg.go.dev/vuln/GO-2026-5026) (x/net/idna fails to reject ASCII-only Punycode labels) as *reachable* via `xtransport.go` → `http.Transport` → `idna.ToASCII` on the DoH upstream path. Practical exploitability is low (hostnames come from our static resolver config), fixed by the bump. After it, `govulncheck` reports **0 reachable vulnerabilities**. The re-vendor also dropped the orphaned `go-hpke-compact` dependency left behind by the ODoH strip.
 - **Not backported (verified not applicable):** upstream's cloaking-rule cycle-detection fix (no cloaking rules used) and the TCP-fallback fix for truncated *forwarded* queries (no forwarding rules configured).
 
+### Upstream rebase to 2.1.18 (2026-07-25)
+
+Merged upstream `2.1.18` on top of the fork. Conflicts and their resolutions:
+
+- **`ReadPrefixed` signature** (`common.go`) — upstream changed `*net.Conn` to
+  `net.Conn` so the reader can be wrapped by the new `firstReadConn`
+  time-to-first-byte probe. Kept the fork's 64 KiB body, adopted the value
+  receiver; callers and `tcp_size_test.go` updated.
+- **CI workflow** — kept the fork's simplified `releases.yml` (test + single
+  `GOAMD64=v3` build), adopted upstream's `persist-credentials: false`
+  hardening on checkout. `codeql-analysis.yml` stays deleted.
+
+Relevant upstream changes inherited: `$PROXY:` prefix in forwarding rules
+(unused here — no forwarding rules), more reliable PQDNSCrypt certificate
+retrieval on fragmented-UDP paths, and **RTT accounting changes that feed
+server selection** — the startup benchmark no longer counts PQ certificate
+transfer time (`3770b529`), and `_dnsExchange` now starts the clock before the
+TCP dial rather than after it (`f8cd9cb7`), since a real TCP query dials fresh
+every time. Expect DNSCrypt-over-TCP RTT estimates to read slightly *higher*
+than on 2.1.17 and the cert-fetch path slightly *lower*.
+
+**Regression caught during this rebase:** the earlier 2.1.17 merge
+(`5adcade5`) silently reverted the precomputed EDNS0 padding patch
+(`431cd331`) — `addEDNS0PaddingIfNoneFound` had fallen back to
+`strings.Repeat("58", paddingLen)` on every DoH query, and the deployed 2.1.17
+binary shipped without it for ~11 days. Restored in the 2.1.18 merge. Every
+other fork patch was verified present by diffing patch markers against
+`edge-stable` (the last known-good fork state) — **an upstream merge that
+touches a patched function can drop a fork patch without producing a conflict,
+so this marker diff is now part of the merge procedure.**
+
 ## Benchmarks
 
 Before/after for the per-query patches, measured on AMD EPYC 7542 with
@@ -159,12 +193,32 @@ lb_strategy = 'wp2'      # only strategy that uses the shared RLock path
 lb_estimator = false     # estimator is unused under WP2; keep it off explicitly
 ```
 
-WP2 (weighted power-of-two-choices) samples two random servers per query, scores
-each by RTT (70%) + success rate (30%), and routes to the better one. Versus
-`fastest` (always the single lowest-RTT node) it spreads load across the anycast
-upstreams (Cloudflare / Quad9 / Google), keeps every server's RTT estimate fresh,
-and avoids the synchronized flip/herd jitter `fastest` exhibits when the estimator
-re-sorts. The per-query selection math (2 RTT reads, a few float divisions, 2
+WP2 (weighted power-of-two-choices) samples two *distinct* random servers per
+query, scores each by RTT (70%) + success rate (30%), and routes to the better
+one. Versus `fastest` (always the single lowest-RTT node) it spreads load across
+the anycast upstreams, keeps every server's RTT estimate fresh, and avoids the
+synchronized flip/herd jitter `fastest` exhibits when the estimator re-sorts.
+
+> **With exactly two servers configured, WP2 degenerates to deterministic
+> best-of-two.** `getWeightedCandidate` forces the second sample to differ from
+> the first, so a 2-server pool is always scored in full and the higher score
+> always wins — the random tie-breaker only fires on exact float equality, which
+> effectively never happens. Scoring normalizes RTT against a 1000 ms ceiling
+> (`rttScore = 1 - rtt/1000`, weighted 0.7), so a 4 ms vs 12 ms gap is a score
+> difference of ~0.006 out of ~1.0 — negligible in magnitude, yet still decisive
+> because the comparison is a strict `>`. The practical result: **the faster
+> server takes essentially all traffic and the other is a hot standby**, taking
+> over only when it wins on score (the leader's RTT degrades) or fails. This is
+> WP2 working as designed, not a misconfiguration.
+>
+> The deployed config runs exactly this two-server case — `cloudflare` (DoH) and
+> `quad9-dnscrypt-ip4-nofilter-pri` (DNSCrypt); Google was deliberately dropped
+> for privacy and is left commented out in the TOML. Cloudflare measures
+> consistently lower (~4 ms, see the startup-benchmark log line), so it wins the
+> comparison on effectively every query and the Quad9 DNSCrypt leg sits as
+> standby. Restoring query-level alternation would mean adding a third upstream
+> of comparable RTT that meets the same privacy bar — a deliberate trade, not a
+> tuning fix, and not a reason to re-add a logging resolver. The per-query selection math (2 RTT reads, a few float divisions, 2
 `rand.Intn`) is negligible, and on Go ≥1.22 without `rand.Seed` the RNG is
 lock-free, so the `RLock` path scales cleanly across all 4 cores. This is a pure
 runtime config change (no rebuild) — applied live to the deployed instance.
@@ -181,9 +235,11 @@ load test (10 s, 10 concurrent clients); `fastest`/`p2` ran with
 | `p2` (est on) | 6 ms | 15 ms | 1,579 | 100% |
 
 `fastest` pins to whatever server was `inner[0]` at startup (often the 6 ms node,
-not the 4 ms one), while WP2's power-of-two sampling keeps catching the
-momentarily-fastest upstream — so WP2 is the lowest-latency option, not a
-load-spreading compromise. The ~25–30% throughput gap is the exclusive `Lock()`
+not the 4 ms one), while WP2's scoring keeps routing to the better upstream — so
+WP2 is the lowest-latency option, not a load-spreading compromise. (This A/B was
+run against the then-current three-server pool; with today's two servers WP2's
+*sampling* no longer varies, but its scoring still picks the better node per
+query, which is what produced the latency win here.) The ~25–30% throughput gap is the exclusive `Lock()`
 (`fastest`/`p2`) serializing selection versus WP2's shared `RLock()`. Conclusion:
 WP2 is both fastest and highest-throughput here; keep it.
 
@@ -197,9 +253,12 @@ catalog:
   stamp = 'sdns://...'              # DoH   (extracted from the signed list)
   [static.'quad9-dnscrypt-ip4-nofilter-pri']
   stamp = 'sdns://...'              # DNSCrypt
-  [static.'google']
-  stamp = 'sdns://...'              # DoH
 ```
+
+Two upstreams only: Google was removed for privacy and its `[static.'google']`
+block is kept commented out in the deployed TOML rather than deleted, so the
+omission reads as intentional. See the WP2 note above for what a two-server pool
+means for selection.
 
 ## Load & fuzz testing
 
