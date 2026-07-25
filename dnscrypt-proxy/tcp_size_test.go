@@ -23,8 +23,7 @@ func TestReadPrefixedLargeResponse(t *testing.T) {
 			server.Write(frame)
 		}()
 
-		var conn net.Conn = client
-		got, err := ReadPrefixed(&conn)
+		got, err := ReadPrefixed(client)
 		if err != nil {
 			t.Errorf("size %d: unexpected error: %v", size, err)
 			client.Close()
@@ -51,8 +50,7 @@ func TestReadPrefixedTooShort(t *testing.T) {
 		server.Write(frame)
 	}()
 
-	var conn net.Conn = client
-	_, err := ReadPrefixed(&conn)
+	_, err := ReadPrefixed(client)
 	client.Close()
 	if err == nil {
 		t.Error("undersized frame accepted")

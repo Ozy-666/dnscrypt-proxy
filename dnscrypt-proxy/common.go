@@ -74,9 +74,9 @@ func PrefixWithSize(packet []byte) ([]byte, error) {
 	return packet, nil
 }
 
-func ReadPrefixed(conn *net.Conn) ([]byte, error) {
+func ReadPrefixed(conn net.Conn) ([]byte, error) {
 	var lenBuf [2]byte
-	if _, err := io.ReadFull(*conn, lenBuf[:]); err != nil {
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
 		return nil, err
 	}
 	packetLength := int(binary.BigEndian.Uint16(lenBuf[:]))
@@ -87,7 +87,7 @@ func ReadPrefixed(conn *net.Conn) ([]byte, error) {
 		return nil, errors.New("Packet too short")
 	}
 	buf := make([]byte, packetLength)
-	if _, err := io.ReadFull(*conn, buf); err != nil {
+	if _, err := io.ReadFull(conn, buf); err != nil {
 		return nil, err
 	}
 	return buf, nil

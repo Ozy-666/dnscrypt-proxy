@@ -496,7 +496,7 @@ func (proxy *Proxy) tcpListener(acceptPc *net.TCPListener) {
 				return
 			}
 			start := time.Now()
-			packet, err := ReadPrefixed(&clientPc)
+			packet, err := ReadPrefixed(clientPc)
 			if err != nil {
 				return
 			}
@@ -580,6 +580,8 @@ func (proxy *Proxy) startAcceptingClients() {
 	}
 	proxy.localDoHListeners = nil
 }
+
+const anonymizedDNSHeaderSize = 8 + 2 + net.IPv6len + 2
 
 func (proxy *Proxy) prepareForRelay(ip net.IP, port int, encryptedQuery *[]byte) {
 	anonymizedDNSHeader := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00}
@@ -747,7 +749,7 @@ func (proxy *Proxy) exchangeWithTCPServer(
 	if _, err := pc.Write(encryptedQuery); err != nil {
 		return nil, err
 	}
-	encryptedResponse, err := ReadPrefixed(&pc)
+	encryptedResponse, err := ReadPrefixed(pc)
 	if err != nil {
 		return nil, err
 	}

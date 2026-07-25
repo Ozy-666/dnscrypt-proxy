@@ -297,6 +297,13 @@ func hasEDNS0Padding(packet []byte) (bool, error) {
 	return false, nil
 }
 
+// EDNS0 padding byte 0x58 as hex ("58"), precomputed to the block size so the
+// per-query DoH padding path slices a shared backing string instead of
+// allocating via strings.Repeat on every query.
+const maxPrecomputedPaddingLen = 64
+
+var paddingHex58 = strings.Repeat("58", maxPrecomputedPaddingLen)
+
 func addEDNS0PaddingIfNoneFound(msg *dns.Msg, unpaddedPacket []byte, paddingLen int) ([]byte, error) {
 	// Enable EDNS0 if not already enabled
 	if msg.UDPSize == 0 {
@@ -309,7 +316,13 @@ func addEDNS0PaddingIfNoneFound(msg *dns.Msg, unpaddedPacket []byte, paddingLen 
 		}
 	}
 	// Add padding
-	paddingRR := &dns.PADDING{Padding: strings.Repeat("58", paddingLen)}
+	var padding string
+	if paddingLen >= 0 && paddingLen <= maxPrecomputedPaddingLen {
+		padding = paddingHex58[:2*paddingLen]
+	} else {
+		padding = strings.Repeat("58", paddingLen)
+	}
+	paddingRR := &dns.PADDING{Padding: padding}
 	msg.Pseudo = append(msg.Pseudo, paddingRR)
 	if err := msg.Pack(); err != nil {
 		return nil, err
@@ -372,15 +385,10 @@ type DNSExchangeResponse struct {
 	err              error
 }
 
-// A resolver and an Anonymized DNSCrypt relay both refuse to return a UDP
-// response larger than the request that triggered it, so a post-quantum
-// certificate only comes back over UDP when the certificate probe is padded past
-// the response. A PQ certificate is ~1.3 KB, ~1.5 KB once paired with the classical
-// certificate; during a key rotation the set doubles to two classical plus two PQ
-// certificates, roughly 3 KB. The large probe is padded past that rollover size so
-// PQ discovery keeps working through relays even mid-rotation. The fragments-blocked
-// probe stays small on purpose, so a PQ resolver truncates it and we still learn of
-// PQ support through the TC bit and fall back to TCP.
+// The large certificate probe covers the PQ rollover set. It is tried first;
+// the small probe follows later to detect paths that block fragmented UDP.
+// Relayed TCP retries retain the large inner query because the relay forwards
+// the lookup over UDP and enforces amplification limits.
 const (
 	certProbePaddedLen           = 3200
 	certProbeFragmentsBlockedLen = 480
@@ -422,6 +430,10 @@ func DNSExchange(
 			}
 			queryCopy := cloneMsg(query)
 			queryCopy.ID += uint16(options)
+			delay := time.Duration(250*tries) * time.Millisecond
+			if tryFragmentsSupport {
+				delay += 250 * time.Millisecond
+			}
 			go func(query *dns.Msg, delay time.Duration) {
 				time.Sleep(delay)
 				option := DNSExchangeResponse{err: errors.New("Canceled")}
@@ -431,9 +443,9 @@ func DNSExchange(
 					option = _dnsExchange(proxy, proto, query, serverAddress, relay, certProbeFragmentsBlockedLen)
 				}
 				option.fragmentsBlocked = true
-				option.priority = 1
+				option.priority = 0
 				channel <- option
-			}(queryCopy, time.Duration(250*tries)*time.Millisecond)
+			}(queryCopy, delay)
 			options++
 		}
 		var bestOption *DNSExchangeResponse
@@ -475,6 +487,19 @@ func DNSExchange(
 	}
 }
 
+type firstReadConn struct {
+	net.Conn
+	firstReadAt time.Time
+}
+
+func (c *firstReadConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && c.firstReadAt.IsZero() {
+		c.firstReadAt = time.Now()
+	}
+	return n, err
+}
+
 func _dnsExchange(
 	proxy *Proxy,
 	proto string,
@@ -487,21 +512,10 @@ func _dnsExchange(
 	var rtt time.Duration
 
 	if proto == "udp" {
-		qNameLen, padding := len(query.Question[0].Header().Name), 0
-		if qNameLen < paddedLen {
-			padding = paddedLen - qNameLen
-		}
-		if padding > 0 {
-			paddingRR := &dns.PADDING{Padding: strings.Repeat("00", padding)}
-			query.Pseudo = append(query.Pseudo, paddingRR)
-			if query.UDPSize == 0 {
-				query.UDPSize = uint16(MaxDNSPacketSize)
-			}
-		}
-		if err := query.Pack(); err != nil {
+		binQuery, err := packDNSExchangeQuery(query, paddedLen, relay != nil)
+		if err != nil {
 			return DNSExchangeResponse{err: err}
 		}
-		binQuery := query.Data
 		udpAddr, err := net.ResolveUDPAddr("udp", serverAddress)
 		if err != nil {
 			return DNSExchangeResponse{err: err}
@@ -511,7 +525,6 @@ func _dnsExchange(
 			proxy.prepareForRelay(udpAddr.IP, udpAddr.Port, &binQuery)
 			upstreamAddr = relay.RelayUDPAddr
 		}
-		now := time.Now()
 		pc, err := net.DialTimeout("udp", upstreamAddr.String(), proxy.timeout)
 		if err != nil {
 			return DNSExchangeResponse{err: err}
@@ -520,6 +533,7 @@ func _dnsExchange(
 		if err := pc.SetDeadline(time.Now().Add(proxy.timeout)); err != nil {
 			return DNSExchangeResponse{err: err}
 		}
+		now := time.Now()
 		if _, err := pc.Write(binQuery); err != nil {
 			return DNSExchangeResponse{err: err}
 		}
@@ -531,10 +545,19 @@ func _dnsExchange(
 		rtt = time.Since(now)
 		packet = packet[:length]
 	} else {
-		if err := query.Pack(); err != nil {
+		var binQuery []byte
+		var err error
+		if relay == nil {
+			err = query.Pack()
+			binQuery = query.Data
+		} else {
+			// The TCP stream itself does not fragment. Padding gives the relay
+			// enough request bytes for the full PQ response on its UDP hop.
+			binQuery, err = packDNSExchangeQuery(query, certProbePaddedLen, false)
+		}
+		if err != nil {
 			return DNSExchangeResponse{err: err}
 		}
-		binQuery := query.Data
 		tcpAddr, err := net.ResolveTCPAddr("tcp", serverAddress)
 		if err != nil {
 			return DNSExchangeResponse{err: err}
@@ -566,11 +589,12 @@ func _dnsExchange(
 		if _, err := pc.Write(binQuery); err != nil {
 			return DNSExchangeResponse{err: err}
 		}
-		packet, err = ReadPrefixed(&pc)
+		timedPc := &firstReadConn{Conn: pc}
+		packet, err = ReadPrefixed(timedPc)
 		if err != nil {
 			return DNSExchangeResponse{err: err}
 		}
-		rtt = time.Since(now)
+		rtt = timedPc.firstReadAt.Sub(now)
 	}
 	msg := dns.Msg{Data: packet}
 	if err := msg.Unpack(); err != nil {
@@ -580,4 +604,35 @@ func _dnsExchange(
 		return DNSExchangeResponse{err: err}
 	}
 	return DNSExchangeResponse{response: &msg, rtt: rtt, err: nil}
+}
+
+func packDNSExchangeQuery(query *dns.Msg, paddedLen int, viaRelay bool) ([]byte, error) {
+	if paddedLen <= 0 {
+		if err := query.Pack(); err != nil {
+			return nil, err
+		}
+		return query.Data, nil
+	}
+	if viaRelay {
+		paddedLen -= anonymizedDNSHeaderSize
+	}
+	if paddedLen <= 0 {
+		return nil, errors.New("Padded length is too small for an anonymized DNS header")
+	}
+
+	paddingRR := &dns.PADDING{}
+	query.Pseudo = append(query.Pseudo, paddingRR)
+	if query.UDPSize == 0 {
+		query.UDPSize = uint16(MaxDNSPacketSize)
+	}
+	if err := query.Pack(); err != nil {
+		return nil, err
+	}
+	if padding := paddedLen - len(query.Data); padding > 0 {
+		paddingRR.Padding = strings.Repeat("00", padding)
+		if err := query.Pack(); err != nil {
+			return nil, err
+		}
+	}
+	return query.Data, nil
 }
