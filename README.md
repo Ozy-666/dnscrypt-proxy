@@ -15,7 +15,6 @@ For original documentation, configuration reference, and upstream changelog see 
 Changes carried in this fork on top of upstream, focused on cutting per-query GC pressure on the hot UDP path and trimming attack surface / binary size:
 
 ### 64 KiB TCP response path (`MaxDNSTCPPacketSize`) — fixes >4 KiB SERVFAILs
-...
 
 Upstream's global `MaxDNSPacketSize = 4096` silently broke every DNS answer
 larger than 4 KiB: the upstream server delivered the full response over TCP,
