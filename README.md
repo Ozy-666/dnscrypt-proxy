@@ -311,3 +311,11 @@ from `/proc` once per second.
 ## Building
 
 Compiled with `GOAMD64=v3` and `CGO_ENABLED=0`, stripped and trimmed, targeting linux/amd64 (AMD EPYC Zen 2).
+---
+
+## License
+
+* **Original Work:** Copyright (c) 2017-2026 Frank Denis (`j at dnscrypt dot org`), released under the **ISC License**.
+* **Edge-Fork Modifications & Custom Patches:** Copyright (c) 2026 **Ozy-666** (`https://dnsdoh.art`), released under the **ISC License**.
+
+See the full [LICENSE](LICENSE) file for details.
