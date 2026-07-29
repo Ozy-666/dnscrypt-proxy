@@ -1,16 +1,21 @@
-# dnscrypt-proxy (edge fork)
+# dnscrypt-proxy (dnsdoh.art edge fork)
 
-Fork of [DNSCrypt/dnscrypt-proxy](https://github.com/DNSCrypt/dnscrypt-proxy) — Linux/amd64 only, built with `GOAMD64=v3` for AMD EPYC Zen 2. Currently rebased on upstream **2.1.18** (2026-07-18).
+> **Upstream:** Forked from [DNSCrypt/dnscrypt-proxy](https://github.com/DNSCrypt/dnscrypt-proxy) by Frank Denis (`@jedisct1`).  
+> **Maintained by:** [Ozy-666](https://github.com/Ozy-666) for the [dnsdoh.art](https://dnsdoh.art) production stack.  
+> **Target:** High-throughput `linux/amd64` (compiled with `GOAMD64=v3` for AMD EPYC Zen 2). Rebased on upstream **2.1.18** (2026-07-18).
 
 Part of the `adguardhome-edge` stack: AGH-Edge → Unbound → dnscrypt-proxy → upstream resolvers (Cloudflare over DoH + Quad9 over DNSCrypt; Google was dropped for privacy). Stack specification and the AGH-Edge component live at [Ozy-666/AdGuardHome-edge-spec](https://github.com/Ozy-666/AdGuardHome-edge-spec).
 
-For documentation, configuration reference, and upstream changelog see the [original repository](https://github.com/DNSCrypt/dnscrypt-proxy).
+For original documentation, configuration reference, and upstream changelog see the [original repository](https://github.com/DNSCrypt/dnscrypt-proxy).
+
+---
 
 ## Edge-fork changes
 
 Changes carried in this fork on top of upstream, focused on cutting per-query GC pressure on the hot UDP path and trimming attack surface / binary size:
 
 ### 64 KiB TCP response path (`MaxDNSTCPPacketSize`) — fixes >4 KiB SERVFAILs
+...
 
 Upstream's global `MaxDNSPacketSize = 4096` silently broke every DNS answer
 larger than 4 KiB: the upstream server delivered the full response over TCP,
