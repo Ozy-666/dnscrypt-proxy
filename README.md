@@ -1,5 +1,28 @@
 # dnscrypt-proxy (dnsdoh.art edge fork)
 
+> [!IMPORTANT]
+> **Archived in October 2026.** This repository is no longer maintained and the code no longer runs anywhere. It stays online, read-only, so the commits, benchmarks and notes can still be linked.
+
+## Where dnsdoh.art went
+
+dnsdoh.art used to run AdGuardHome-edge -> Unbound -> dnscrypt-proxy, with patched forks of AdGuardHome, dnsproxy, urlfilter and dnscrypt-proxy. Each upstream release meant rebasing and re-benchmarking all four forks. Between late September and early October 2026 the stack was replaced by two upstream projects with no patches applied:
+
+```
+nginx      443 DoH + DoH3
+  └─> dnsdist  53 plain · 853 DoT + DoQ · blocklists
+        └─> Unbound  127.0.0.1 · DNSSEC validation
+              └─> DoT  Cloudflare 1.1.1.1 · Quad9 9.9.9.10
+```
+
+- **2026-09-27** - dnsdist took over ports 53 and 853 from AdGuardHome-edge.
+- **2026-10-04** - Unbound began forwarding over DoT itself. AdGuardHome-edge, dnsproxy and dnscrypt-proxy were removed from the server.
+
+This fork sat between Unbound and the upstream resolvers. Unbound now talks DoT to them directly.
+
+Current versions and the resolver build are at [Ozy-666/unbound-edge](https://github.com/Ozy-666/unbound-edge), and the service at [dnsdoh.art](https://dnsdoh.art).
+
+---
+
 > **Upstream:** Forked from [DNSCrypt/dnscrypt-proxy](https://github.com/DNSCrypt/dnscrypt-proxy) by Frank Denis (`@jedisct1`).  
 > **Maintained by:** [Ozy-666](https://github.com/Ozy-666) for the [dnsdoh.art](https://dnsdoh.art) production stack.  
 > **Target:** High-throughput `linux/amd64` (compiled with `GOAMD64=v3` for AMD EPYC Zen 2). Rebased on upstream **2.1.18** (2026-07-18).
